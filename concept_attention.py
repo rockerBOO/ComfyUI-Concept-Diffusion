@@ -53,12 +53,9 @@ class ConceptMaps:
 class ConceptAttentionState:
     """Shared, mutable accumulator for a single concept attention run."""
 
-    def __init__(self, concepts, concept_ctx, layer_indices, softmax=True, temperature=1.0):
+    def __init__(self, concepts, concept_ctx):
         self.concepts = concepts
         self.concept_ctx = concept_ctx
-        self.cache = set(layer_indices)
-        self.softmax = softmax
-        self.temperature = temperature
 
         self.dit = None
         self.grid = None
@@ -66,12 +63,16 @@ class ConceptAttentionState:
         self.concept_pe = None
         self.tvec = None
         self.call_concept = {}
-        self.scores_sum = None
-        self.count = 0
+        self.layer_scores = {}
+        self.layer_count = {}
 
     @property
     def num_concepts(self):
         return len(self.concepts)
+
+    @property
+    def layers(self):
+        return sorted(self.layer_scores)
 
     # -- per-forward setup -------------------------------------------------
 
@@ -100,11 +101,13 @@ class ConceptAttentionState:
         return residual.expand(x.shape[0], -1, -1)
 
     def add_scores(self, dot, layer_index):
-        if layer_index not in self.cache:
-            return
         dot = dot.detach().float().cpu()
-        self.scores_sum = dot if self.scores_sum is None else self.scores_sum + dot
-        self.count += 1
+        if layer_index in self.layer_scores:
+            self.layer_scores[layer_index] = self.layer_scores[layer_index] + dot
+            self.layer_count[layer_index] += 1
+        else:
+            self.layer_scores[layer_index] = dot
+            self.layer_count[layer_index] = 1
 
 
 # ---------------------------------------------------------------------------
@@ -365,24 +368,24 @@ def _krea2_output_patch(out, extra_options):
 # Encode entry point
 # ---------------------------------------------------------------------------
 
-def make_state(model, clip, concepts, layer_start, layer_end, softmax=True, temperature=1.0):
+def make_state(model, clip, concepts):
     """Build a ConceptAttentionState plus the resolved backbone for the nodes."""
     base = model.model
     dit, is_krea2 = _is_supported(base)
     concepts = [c.strip() for c in concepts if c and c.strip()]
     if not concepts:
         raise ValueError("concept_list must contain at least one concept")
-    layer_indices = _layer_indices_for(dit, layer_start, layer_end)
     concept_ctx = encode_concept_context(clip, concepts, is_krea2)
-    return ConceptAttentionState(concepts, concept_ctx, layer_indices, softmax, temperature), dit, is_krea2
+    return ConceptAttentionState(concepts, concept_ctx), dit, is_krea2
 
 
 def compute_concept_attention(model, vae, clip, image, prompt, concepts,
                               layer_start=None, layer_end=None, num_steps=4,
                               noise_timestep=2, seed=0, softmax=True,
-                              temperature=1.0):
+                              temperature=1000.0):
     base = model.model
-    state, dit, is_krea2 = make_state(model, clip, concepts, layer_start, layer_end, softmax, temperature)
+    state, dit, is_krea2 = make_state(model, clip, concepts)
+    layer_indices = _layer_indices_for(dit, layer_start, layer_end)
 
     latent = vae.encode(image[..., :3])
     latent = base.process_latent_in(latent)
@@ -406,20 +409,37 @@ def compute_concept_attention(model, vae, clip, image, prompt, concepts,
     install(state, dit, is_krea2, transformer_options)
 
     base.apply_model(noisy, t, c_crossattn=context, transformer_options=transformer_options)
-    return build_maps(state, image)
+    return build_maps(state, image, layer_indices, softmax, temperature)
 
 
 # ---------------------------------------------------------------------------
 # Heatmaps
 # ---------------------------------------------------------------------------
 
-def build_maps(state, image):
-    if state.scores_sum is None:
+def resolve_layers(state, layer_start=None, layer_end=None):
+    if layer_start is not None and layer_start >= 0:
+        depth = depth_of(state.dit)
+        layer_start = max(0, min(layer_start, depth - 1))
+        layer_end = depth if layer_end is None or layer_end <= 0 else min(layer_end, depth)
+        selected = [i for i in range(layer_start, max(layer_start + 1, layer_end)) if i in state.layer_scores]
+        if selected:
+            return selected
+    depth = depth_of(state.dit)
+    return [i for i in range(max(0, depth - 4), depth) if i in state.layer_scores]
+
+
+def build_maps(state, image, layer_indices=None, softmax=True, temperature=1000.0):
+    if not state.layer_scores:
         raise RuntimeError("ConceptAttention did not collect any attention; was the patched model used?")
 
-    scores = state.scores_sum / max(state.count, 1)
-    if state.softmax:
-        scores = torch.softmax(scores / max(float(state.temperature), 1e-6), dim=0)
+    layers = layer_indices if layer_indices is not None else resolve_layers(state)
+    layers = [i for i in layers if i in state.layer_scores]
+    if not layers:
+        raise RuntimeError("ConceptAttention collected no attention for the requested layers")
+
+    scores = sum(state.layer_scores[i] / state.layer_count[i] for i in layers) / len(layers)
+    if softmax:
+        scores = torch.softmax(scores / max(float(temperature), 1e-6), dim=0)
 
     grid_h, grid_w = state.grid
     if grid_h * grid_w != scores.shape[1]:

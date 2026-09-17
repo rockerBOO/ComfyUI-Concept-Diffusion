@@ -1,619 +1,137 @@
 {
-  "last_node_id": 13,
-  "last_link_id": 14,
+  "last_node_id": 14,
+  "last_link_id": 15,
   "nodes": [
     {
-      "id": 1,
-      "type": "UNETLoader",
-      "pos": [
-        40,
-        40
-      ],
-      "size": [
-        360,
-        82
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": [
-            1
-          ],
-          "slot_index": 0
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "UNETLoader"
-      },
-      "widgets_values": [
-        "krea2_raw_nvfp4_convrot_int8.safetensors",
-        "default"
-      ]
+      "id": 1, "type": "UNETLoader", "pos": [40, 40], "size": [360, 82], "flags": {}, "order": 0, "mode": 0,
+      "outputs": [{"name": "MODEL", "type": "MODEL", "links": [1], "slot_index": 0}],
+      "properties": {"Node name for S&R": "UNETLoader"},
+      "widgets_values": ["krea2_raw_nvfp4_convrot_int8.safetensors", "default"]
     },
     {
-      "id": 2,
-      "type": "CLIPLoader",
-      "pos": [
-        40,
-        160
-      ],
-      "size": [
-        360,
-        106
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "outputs": [
-        {
-          "name": "CLIP",
-          "type": "CLIP",
-          "links": [
-            2,
-            3,
-            4
-          ],
-          "slot_index": 0
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CLIPLoader"
-      },
-      "widgets_values": [
-        "500c/qwen3vl_4b_bf16.safetensors",
-        "krea2",
-        "default"
-      ]
+      "id": 2, "type": "CLIPLoader", "pos": [40, 160], "size": [360, 106], "flags": {}, "order": 1, "mode": 0,
+      "outputs": [{"name": "CLIP", "type": "CLIP", "links": [3, 4, 5], "slot_index": 0}],
+      "properties": {"Node name for S&R": "CLIPLoader"},
+      "widgets_values": ["500c/qwen3vl_4b_bf16.safetensors", "krea2", "default"]
     },
     {
-      "id": 3,
-      "type": "VAELoader",
-      "pos": [
-        40,
-        300
-      ],
-      "size": [
-        360,
-        58
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "outputs": [
-        {
-          "name": "VAE",
-          "type": "VAE",
-          "links": [
-            10
-          ],
-          "slot_index": 0
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "VAELoader"
-      },
-      "widgets_values": [
-        "wan_2.1_vae.safetensors"
-      ]
+      "id": 3, "type": "VAELoader", "pos": [40, 300], "size": [360, 58], "flags": {}, "order": 2, "mode": 0,
+      "outputs": [{"name": "VAE", "type": "VAE", "links": [11], "slot_index": 0}],
+      "properties": {"Node name for S&R": "VAELoader"},
+      "widgets_values": ["wan_2.1_vae.safetensors"]
     },
     {
-      "id": 4,
-      "type": "CLIPTextEncode",
-      "pos": [
-        440,
-        40
-      ],
-      "size": [
-        360,
-        140
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
+      "id": 4, "type": "CLIPTextEncode", "pos": [440, 40], "size": [360, 140], "flags": {}, "order": 3, "mode": 0,
+      "inputs": [{"name": "clip", "type": "CLIP", "link": 4}],
+      "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [7], "slot_index": 0}],
+      "properties": {"Node name for S&R": "CLIPTextEncode"},
+      "widgets_values": ["A dragon on a hill."]
+    },
+    {
+      "id": 5, "type": "CLIPTextEncode", "pos": [440, 210], "size": [360, 140], "flags": {}, "order": 4, "mode": 0,
+      "inputs": [{"name": "clip", "type": "CLIP", "link": 5}],
+      "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [8], "slot_index": 0}],
+      "properties": {"Node name for S&R": "CLIPTextEncode"},
+      "widgets_values": [""]
+    },
+    {
+      "id": 6, "type": "LoraLoaderModelOnly", "pos": [440, 380], "size": [360, 82], "flags": {}, "order": 5, "mode": 0,
+      "inputs": [{"name": "model", "type": "MODEL", "link": 1}],
+      "outputs": [{"name": "MODEL", "type": "MODEL", "links": [2], "slot_index": 0}],
+      "properties": {"Node name for S&R": "LoraLoaderModelOnly"},
+      "widgets_values": ["lora/krea2/krea2_turbo_lora_rank_64_bf16.safetensors", 1.0]
+    },
+    {
+      "id": 7, "type": "ConceptAttentionModel", "pos": [440, 500], "size": [360, 82], "flags": {}, "order": 6, "mode": 0,
       "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 3
-        }
+        {"name": "model", "type": "MODEL", "link": 2},
+        {"name": "clip", "type": "CLIP", "link": 3}
       ],
       "outputs": [
-        {
-          "name": "CONDITIONING",
-          "type": "CONDITIONING",
-          "links": [
-            6
-          ],
-          "slot_index": 0
-        }
+        {"name": "model", "type": "MODEL", "links": [6], "slot_index": 0},
+        {"name": "concept_state", "type": "CONCEPT_ATTENTION", "links": [13], "slot_index": 1}
       ],
-      "properties": {
-        "Node name for S&R": "CLIPTextEncode"
-      },
-      "widgets_values": [
-        "A dragon on a hill."
-      ]
+      "properties": {"Node name for S&R": "ConceptAttentionModel"},
+      "widgets_values": ["dragon, rock, sky, clouds"]
     },
     {
-      "id": 5,
-      "type": "CLIPTextEncode",
-      "pos": [
-        440,
-        210
-      ],
-      "size": [
-        360,
-        140
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
+      "id": 8, "type": "EmptyLatentImage", "pos": [440, 620], "size": [360, 106], "flags": {}, "order": 7, "mode": 0,
+      "outputs": [{"name": "LATENT", "type": "LATENT", "links": [9], "slot_index": 0}],
+      "properties": {"Node name for S&R": "EmptyLatentImage"},
+      "widgets_values": [1024, 1024, 1]
+    },
+    {
+      "id": 9, "type": "KSampler", "pos": [840, 40], "size": [320, 262], "flags": {}, "order": 8, "mode": 0,
       "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 4
-        }
+        {"name": "model", "type": "MODEL", "link": 6},
+        {"name": "positive", "type": "CONDITIONING", "link": 7},
+        {"name": "negative", "type": "CONDITIONING", "link": 8},
+        {"name": "latent_image", "type": "LATENT", "link": 9}
       ],
-      "outputs": [
-        {
-          "name": "CONDITIONING",
-          "type": "CONDITIONING",
-          "links": [
-            7
-          ],
-          "slot_index": 0
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "CLIPTextEncode"
-      },
-      "widgets_values": [
-        ""
-      ]
+      "outputs": [{"name": "LATENT", "type": "LATENT", "links": [10], "slot_index": 0}],
+      "properties": {"Node name for S&R": "KSampler"},
+      "widgets_values": [0, "fixed", 8, 1.0, "euler", "simple", 1.0]
     },
     {
-      "id": 6,
-      "type": "ConceptAttentionModel",
-      "pos": [
-        440,
-        380
-      ],
-      "size": [
-        360,
-        170
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
+      "id": 10, "type": "VAEDecode", "pos": [840, 340], "size": [320, 46], "flags": {}, "order": 9, "mode": 0,
       "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 1
-        },
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 2
-        }
+        {"name": "samples", "type": "LATENT", "link": 10},
+        {"name": "vae", "type": "VAE", "link": 11}
       ],
-      "outputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "links": [
-            5
-          ],
-          "slot_index": 0
-        },
-        {
-          "name": "concept_state",
-          "type": "CONCEPT_ATTENTION",
-          "links": [
-            12
-          ],
-          "slot_index": 1
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "ConceptAttentionModel"
-      },
-      "widgets_values": [
-        "dragon, rock, sky, clouds",
-        -1,
-        -1,
-        true,
-        1.0
-      ]
+      "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [12], "slot_index": 0}],
+      "properties": {"Node name for S&R": "VAEDecode"}
     },
     {
-      "id": 7,
-      "type": "EmptyLatentImage",
-      "pos": [
-        440,
-        580
-      ],
-      "size": [
-        360,
-        106
-      ],
-      "flags": {},
-      "order": 6,
-      "mode": 0,
-      "outputs": [
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "links": [
-            8
-          ],
-          "slot_index": 0
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "EmptyLatentImage"
-      },
-      "widgets_values": [
-        1024,
-        1024,
-        1
-      ]
-    },
-    {
-      "id": 8,
-      "type": "KSampler",
-      "pos": [
-        840,
-        40
-      ],
-      "size": [
-        320,
-        262
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
+      "id": 11, "type": "ConceptAttentionMaps", "pos": [1200, 40], "size": [360, 190], "flags": {}, "order": 10, "mode": 0,
       "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 5
-        },
-        {
-          "name": "positive",
-          "type": "CONDITIONING",
-          "link": 6
-        },
-        {
-          "name": "negative",
-          "type": "CONDITIONING",
-          "link": 7
-        },
-        {
-          "name": "latent_image",
-          "type": "LATENT",
-          "link": 8
-        }
+        {"name": "concept_state", "type": "CONCEPT_ATTENTION", "link": 13},
+        {"name": "image", "type": "IMAGE", "link": 12}
       ],
       "outputs": [
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "links": [
-            9
-          ],
-          "slot_index": 0
-        }
+        {"name": "concept_maps", "type": "CONCEPT_MAPS", "links": [], "slot_index": 0},
+        {"name": "heatmaps", "type": "IMAGE", "links": [14], "slot_index": 1},
+        {"name": "overlay", "type": "IMAGE", "links": [15], "slot_index": 2}
       ],
-      "properties": {
-        "Node name for S&R": "KSampler"
-      },
-      "widgets_values": [
-        0,
-        "fixed",
-        20,
-        1.0,
-        "euler",
-        "simple",
-        1.0
-      ]
+      "properties": {"Node name for S&R": "ConceptAttentionMaps"},
+      "widgets_values": [0.5, -1, -1, true, 1000.0]
     },
     {
-      "id": 9,
-      "type": "VAEDecode",
-      "pos": [
-        840,
-        340
-      ],
-      "size": [
-        320,
-        46
-      ],
-      "flags": {},
-      "order": 8,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "samples",
-          "type": "LATENT",
-          "link": 9
-        },
-        {
-          "name": "vae",
-          "type": "VAE",
-          "link": 10
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            11
-          ],
-          "slot_index": 0
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "VAEDecode"
-      }
-    },
-    {
-      "id": 10,
-      "type": "ConceptAttentionMaps",
-      "pos": [
-        1200,
-        40
-      ],
-      "size": [
-        360,
-        150
-      ],
-      "flags": {},
-      "order": 9,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "concept_state",
-          "type": "CONCEPT_ATTENTION",
-          "link": 12
-        },
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 11
-        }
-      ],
-      "outputs": [
-        {
-          "name": "concept_maps",
-          "type": "CONCEPT_MAPS",
-          "links": [],
-          "slot_index": 0
-        },
-        {
-          "name": "heatmaps",
-          "type": "IMAGE",
-          "links": [
-            13
-          ],
-          "slot_index": 1
-        },
-        {
-          "name": "overlay",
-          "type": "IMAGE",
-          "links": [
-            14
-          ],
-          "slot_index": 2
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "ConceptAttentionMaps"
-      },
-      "widgets_values": [
-        0.5
-      ]
-    },
-    {
-      "id": 11,
-      "type": "SaveImage",
-      "pos": [
-        1600,
-        40
-      ],
-      "size": [
-        400,
-        450
-      ],
-      "flags": {},
-      "order": 10,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 13
-        }
-      ],
+      "id": 12, "type": "SaveImage", "pos": [1600, 40], "size": [400, 450], "flags": {}, "order": 11, "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 14}],
       "outputs": [],
-      "properties": {
-        "Node name for S&R": "SaveImage"
-      },
-      "widgets_values": [
-        "concept_heatmaps"
-      ]
+      "properties": {"Node name for S&R": "SaveImage"},
+      "widgets_values": ["concept_heatmaps"]
     },
     {
-      "id": 12,
-      "type": "SaveImage",
-      "pos": [
-        1600,
-        520
-      ],
-      "size": [
-        400,
-        450
-      ],
-      "flags": {},
-      "order": 11,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 14
-        }
-      ],
+      "id": 13, "type": "SaveImage", "pos": [1600, 520], "size": [400, 450], "flags": {}, "order": 12, "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 15}],
       "outputs": [],
-      "properties": {
-        "Node name for S&R": "SaveImage"
-      },
-      "widgets_values": [
-        "concept_overlay"
-      ]
+      "properties": {"Node name for S&R": "SaveImage"},
+      "widgets_values": ["concept_overlay"]
     },
     {
-      "id": 13,
-      "type": "Note",
-      "pos": [
-        1200,
-        240
-      ],
-      "size": [
-        360,
-        260
-      ],
-      "flags": {},
-      "order": 12,
-      "mode": 0,
+      "id": 14, "type": "Note", "pos": [1200, 260], "size": [360, 280], "flags": {}, "order": 13, "mode": 0,
       "outputs": [],
-      "properties": {
-        "Node name for S&R": "Note"
-      },
-      "widgets_values": [
-        "Generation-time ConceptAttention (Krea 2 preset).\nConcept Attention Model patches the MODEL; the maps are captured during KSampler and turned into heatmaps after VAE decode.\n\nFor Flux.2 Klein: UNETLoader -> klein model, CLIPLoader type flux2 with qwen_3_4b/qwen_3_8b, VAELoader -> Flux2 VAE.\n\nFor attributing an existing image instead, use example_workflow_encode.json."
-      ]
+      "properties": {"Node name for S&R": "Note"},
+      "widgets_values": ["Quantity of attention is collected during sampling; layer/temperature are chosen at the Maps node, so you can retune without re-sampling.\n\nLoRA must come BEFORE Concept Attention Model, and Concept Attention Model must be the last model node into KSampler.\n\ntemperature 1000 is the paper's Flux.2 default; lower it toward 1 for sharper/binary maps."]
     }
   ],
   "links": [
-    [
-      1,
-      1,
-      0,
-      6,
-      0,
-      "MODEL"
-    ],
-    [
-      2,
-      2,
-      0,
-      6,
-      1,
-      "CLIP"
-    ],
-    [
-      3,
-      2,
-      0,
-      4,
-      0,
-      "CLIP"
-    ],
-    [
-      4,
-      2,
-      0,
-      5,
-      0,
-      "CLIP"
-    ],
-    [
-      5,
-      6,
-      0,
-      8,
-      0,
-      "MODEL"
-    ],
-    [
-      6,
-      4,
-      0,
-      8,
-      1,
-      "CONDITIONING"
-    ],
-    [
-      7,
-      5,
-      0,
-      8,
-      2,
-      "CONDITIONING"
-    ],
-    [
-      8,
-      7,
-      0,
-      8,
-      3,
-      "LATENT"
-    ],
-    [
-      9,
-      8,
-      0,
-      9,
-      0,
-      "LATENT"
-    ],
-    [
-      10,
-      3,
-      0,
-      9,
-      1,
-      "VAE"
-    ],
-    [
-      11,
-      9,
-      0,
-      10,
-      1,
-      "IMAGE"
-    ],
-    [
-      12,
-      6,
-      1,
-      10,
-      0,
-      "CONCEPT_ATTENTION"
-    ],
-    [
-      13,
-      10,
-      1,
-      11,
-      0,
-      "IMAGE"
-    ],
-    [
-      14,
-      10,
-      2,
-      12,
-      0,
-      "IMAGE"
-    ]
+    [1, 1, 0, 6, 0, "MODEL"],
+    [2, 6, 0, 7, 0, "MODEL"],
+    [3, 2, 0, 7, 1, "CLIP"],
+    [4, 2, 0, 4, 0, "CLIP"],
+    [5, 2, 0, 5, 0, "CLIP"],
+    [6, 7, 0, 9, 0, "MODEL"],
+    [7, 4, 0, 9, 1, "CONDITIONING"],
+    [8, 5, 0, 9, 2, "CONDITIONING"],
+    [9, 8, 0, 9, 3, "LATENT"],
+    [10, 9, 0, 10, 0, "LATENT"],
+    [11, 3, 0, 10, 1, "VAE"],
+    [12, 10, 0, 11, 1, "IMAGE"],
+    [13, 7, 1, 11, 0, "CONCEPT_ATTENTION"],
+    [14, 11, 1, 12, 0, "IMAGE"],
+    [15, 11, 2, 13, 0, "IMAGE"]
   ],
   "groups": [],
   "config": {},

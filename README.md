@@ -40,7 +40,12 @@ CLIPLoader ─┘            │ concept_state                                  
                                                     │ heatmaps / overlay
 ```
 
-See `example_workflow.json`.
+See `example_workflow.json` (UI) or `example_workflow_api.json` (API format).
+
+> The LoRA must come **before** `Concept Attention Model`, and
+> `Concept Attention Model` must be the last model node into `KSampler`.
+> If they are wired in parallel, the sampler runs the unpatched model and no
+> attention is collected.
 
 ### Encode (attribute an existing image)
 
@@ -54,15 +59,19 @@ See `example_workflow_encode.json`.
 
 - **Concept Attention (encode image)** — image in, `concept_maps` +
   labeled `heatmaps` + `overlay` out.
-- **Concept Attention Model (generate)** — MODEL + CLIP + concept list in,
-  patched MODEL + `concept_state` out.
-- **Concept Attention Maps** — `concept_state` + decoded IMAGE in, maps out.
+- **Concept Attention Model (generate)** — `MODEL` + `CLIP` + concept list in,
+  patched `MODEL` + `concept_state` out. It must be the **last model node**
+  before `KSampler` (put LoRAs *before* it).
+- **Concept Attention Maps** — `concept_state` + decoded `IMAGE` in, maps out.
+  Owns `layer_start` / `layer_end` / `softmax` / `temperature` / `alpha`, so you
+  can retune without re-sampling.
 - **Concept Attention Visualizer** — overlay one concept (or all) onto an image.
 - **Concept Saliency Map** — threshold one concept into a `MASK` + saliency image.
 
 `layer_start` / `layer_end` select the transformer blocks to average over (`-1`
-= the last 4). `softmax` (on by default) normalizes across concepts per pixel;
-`temperature` divides the scores first.
+= the last 4). `temperature` defaults to `1000` (the paper's Flux.2 value);
+lower it toward `1` for sharper, more binary maps. `softmax` normalizes across
+concepts per pixel.
 
 ## Notes
 

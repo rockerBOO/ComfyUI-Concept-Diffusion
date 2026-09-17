@@ -22,6 +22,7 @@ from .concept_attention import (
     compute_concept_attention,
     install,
     make_state,
+    resolve_layers,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,8 +42,10 @@ def _to_numpy(image):
 
 
 def _to_comfy_image(array):
-    array = np.clip(np.asarray(array, dtype=np.float32), 0.0, 1.0)
-    return torch.from_numpy(array)[None, ...]
+    array = np.asarray(array, dtype=np.float32)
+    if array.size and float(array.max()) > 1.5:
+        array = array / 255.0
+    return torch.from_numpy(np.clip(array, 0.0, 1.0))[None, ...]
 
 
 def _colormap(heatmap):
@@ -76,7 +79,7 @@ _COMMON_CONCEPT_WIDGETS = {
     "layer_start": ("INT", {"default": -1, "min": -1, "max": 200, "step": 1}),
     "layer_end": ("INT", {"default": -1, "min": -1, "max": 200, "step": 1}),
     "softmax": ("BOOLEAN", {"default": True}),
-    "temperature": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1000.0, "step": 0.01}),
+    "temperature": ("FLOAT", {"default": 1000.0, "min": 0.01, "max": 100000.0, "step": 0.01}),
 }
 
 
@@ -134,13 +137,11 @@ class ConceptAttentionModel:
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
                 "concepts": ("STRING", {"multiline": True, "default": "dragon, rock, sky, clouds"}),
-                **_COMMON_CONCEPT_WIDGETS,
             }
         }
 
-    def apply(self, model, clip, concepts, layer_start, layer_end, softmax, temperature):
-        state, dit, is_krea2 = make_state(model, clip, _parse_concepts(concepts),
-                                          layer_start, layer_end, softmax, temperature)
+    def apply(self, model, clip, concepts):
+        state, dit, is_krea2 = make_state(model, clip, _parse_concepts(concepts))
         patcher = model.clone()
         transformer_options = patcher.model_options.setdefault("transformer_options", {})
         transformer_options["concept_state"] = state
@@ -163,11 +164,12 @@ class ConceptAttentionMaps:
                 "concept_state": ("CONCEPT_ATTENTION",),
                 "image": ("IMAGE",),
                 "alpha": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                **_COMMON_CONCEPT_WIDGETS,
             }
         }
 
-    def run(self, concept_state, image, alpha):
-        maps = build_maps(concept_state, image)
+    def run(self, concept_state, image, alpha, layer_start, layer_end, softmax, temperature):
+        maps = build_maps(concept_state, image, resolve_layers(concept_state, layer_start, layer_end), softmax, temperature)
         heatmaps, overlay = _visualize(maps, image, alpha)
         return maps, heatmaps, overlay
 
