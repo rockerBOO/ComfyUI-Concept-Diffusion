@@ -4,6 +4,8 @@ Per-concept saliency maps for diffusion transformers, from
 [ConceptAttention](https://arxiv.org/abs/2502.04320). Works with nvfp4 and
 int8-convrot models.
 
+![Concept Attention on Krea 2](images/concept_attention_workflow.png)
+
 ## Supported models
 
 | Model | Text encoder | VAE |
