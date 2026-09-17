@@ -24,28 +24,27 @@ Krea 2 is a single-stream MMDiT, so concept queries attend to
 `[concept keys, image keys]` while the image output comes from the normal
 `[text + image]` attention. Flux.2 uses the paper's double-stream formulation.
 
+## Install
+
+Copy this folder into `ComfyUI/custom_nodes/` and restart ComfyUI. Only
+`torch`, `numpy`, `Pillow` and `matplotlib` are used (all already present in a
+normal ComfyUI install).
+
 ## Two modes
 
 ### Generate (the paper's main result)
 
-`Concept Attention Model` patches a MODEL. Sample normally with `KSampler`, then
-`Concept Attention Maps` turns the attention collected across every denoising
-step into heatmaps for the generated image.
+`Concept Attention Model` patches a `MODEL`. Sample normally with `KSampler`,
+then `Concept Attention Maps` turns the attention collected across every
+denoising step into heatmaps for the generated image.
 
 ```
-UNETLoader ─┐
-            ├─ Concept Attention Model ── model ──► KSampler ──► VAEDecode ──┐
-CLIPLoader ─┘            │ concept_state                                     │
-                         └────────────────► Concept Attention Maps ◄─────────┘
-                                                    │ heatmaps / overlay
+UNETLoader ─► LoraLoader ─┐
+                          ├─ Concept Attention Model ─ model ─► KSampler ─► VAEDecode ─┐
+CLIPLoader ───────────────┘            │ concept_state                                  │
+                                       └──────► Concept Attention Maps ◄────────────────┘
+                                                        │ heatmaps / overlay
 ```
-
-See `example_workflow.json` (UI) or `example_workflow_api.json` (API format).
-
-> The LoRA must come **before** `Concept Attention Model`, and
-> `Concept Attention Model` must be the last model node into `KSampler`.
-> If they are wired in parallel, the sampler runs the unpatched model and no
-> attention is collected.
 
 ### Encode (attribute an existing image)
 
@@ -53,31 +52,50 @@ See `example_workflow.json` (UI) or `example_workflow_api.json` (API format).
 add noise at `noise_timestep` of `num_steps`, run one forward pass, and return
 the maps plus an overlay.
 
-See `example_workflow_encode.json`.
-
 ## Nodes
 
-- **Concept Attention (encode image)** — image in, `concept_maps` +
-  labeled `heatmaps` + `overlay` out.
+- **Concept Attention (encode image)** — image in, `concept_maps` + labeled
+  `heatmaps` + `overlay` out.
 - **Concept Attention Model (generate)** — `MODEL` + `CLIP` + concept list in,
-  patched `MODEL` + `concept_state` out. It must be the **last model node**
-  before `KSampler` (put LoRAs *before* it).
+  patched `MODEL` + `concept_state` out.
 - **Concept Attention Maps** — `concept_state` + decoded `IMAGE` in, maps out.
-  Owns `layer_start` / `layer_end` / `softmax` / `temperature` / `alpha`, so you
-  can retune without re-sampling.
 - **Concept Attention Visualizer** — overlay one concept (or all) onto an image.
 - **Concept Saliency Map** — threshold one concept into a `MASK` + saliency image.
 
-`layer_start` / `layer_end` select the transformer blocks to average over (`-1`
-= the last 4). `temperature` defaults to `1000` (the paper's Flux.2 value);
-lower it toward `1` for sharper, more binary maps. `softmax` normalizes across
-concepts per pixel.
+## Settings
 
-## Notes
+- `temperature` — defaults to **1000**, the paper's Flux.2 value. Lower it
+  toward `1` for sharper, more binary maps; raise it for smoother maps.
+- `softmax` — normalizes across concepts per pixel (keep on).
+- `layer_start` / `layer_end` — which transformer blocks to average over.
+  `-1` = the last 4 blocks.
+- `noise_timestep` / `num_steps` — encode mode only; the paper uses `2` and `4`.
 
-- The paper's `encode_image` defaults are `noise_timestep=2`, `num_steps=4`.
-- Only the positive/cond batch is scored when CFG is active.
-- Raise `temperature` if maps look washed out, lower it if too binary.
+## Example workflows
+
+In [`example_workflows/`](example_workflows):
+
+| File | Description |
+|------|-------------|
+| `generate_krea2.json` | Generate + capture, Krea 2 (UI format) |
+| `generate_krea2_api.json` | Same graph in API format (`POST /prompt`) |
+| `encode_image.json` | Attribute an existing image (UI format) |
+
+## Gotchas
+
+- **LoRA ordering.** A LoRA must come *before* `Concept Attention Model`, and
+  `Concept Attention Model` must be the **last model node** into `KSampler`. If
+  they are wired in parallel, the sampler runs the unpatched model and nothing is
+  collected.
+- **Concepts must appear in the prompt.** A concept that isn't in the prompt
+  (e.g. `dragon` on a photo of a woman) produces a diffuse, unrelated map. That's
+  expected.
+- **Fresh per run.** `Concept Attention Model` is marked non-cacheable, so each
+  run collects into a new state. Reusing one `concept_state` across two samplers
+  in the same graph would mix them.
+- **Map resolution** is the model's latent token grid (e.g. 64×64 for Krea 2 at
+  1024), upsampled to the image. `temperature` controls softness, not resolution.
+- When CFG is active, only the positive/cond batch is scored.
 
 ## Based on
 
@@ -86,4 +104,4 @@ concepts per pixel.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Original work © 2025 Junst; rewrite © 2026 rockerBOO.
