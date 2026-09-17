@@ -10,6 +10,7 @@ Two ways to use it:
 """
 
 import logging
+import time
 
 import numpy as np
 import torch
@@ -139,6 +140,13 @@ class ConceptAttentionModel:
                 "concepts": ("STRING", {"multiline": True, "default": "dragon, rock, sky, clouds"}),
             }
         }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # The state is a mutable accumulator filled in during sampling, so it must
+        # never be served from ComfyUI's output cache (that would pile a new run's
+        # attention on top of the previous run's).
+        return time.time_ns()
 
     def apply(self, model, clip, concepts):
         state, dit, is_krea2 = make_state(model, clip, _parse_concepts(concepts))
