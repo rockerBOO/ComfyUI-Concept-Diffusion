@@ -46,7 +46,19 @@ def _to_comfy_image(array):
     array = np.asarray(array, dtype=np.float32)
     if array.size and float(array.max()) > 1.5:
         array = array / 255.0
-    return torch.from_numpy(np.clip(array, 0.0, 1.0))[None, ...]
+    array = np.clip(array, 0.0, 1.0)
+    if array.ndim == 3:
+        array = array[None, ...]
+    return torch.from_numpy(array)
+
+
+def _caption(image, text):
+    image = Image.fromarray(image)
+    draw = ImageDraw.Draw(image)
+    left, top, right, bottom = draw.textbbox((0, 0), text)
+    draw.rectangle((0, 0, right - left + 12, bottom - top + 10), fill=(0, 0, 0))
+    draw.text((6, 5), text, fill=(255, 255, 255))
+    return np.asarray(image)
 
 
 def _colormap(heatmap):
@@ -54,26 +66,18 @@ def _colormap(heatmap):
     return (rgba[:, :, :3] * 255).astype(np.uint8)
 
 
-def _label(image, text):
-    image = Image.fromarray(image)
-    draw = ImageDraw.Draw(image)
-    draw.rectangle((0, image.height - 26, image.width, image.height), fill=(0, 0, 0))
-    draw.text((6, image.height - 22), text, fill=(255, 255, 255))
-    return np.asarray(image)
+def _overlay_labeled(base, heatmap, text, alpha):
+    colored = colormaps["plasma"](np.asarray(heatmap, dtype=np.float32))[:, :, :3]
+    weight = np.asarray(heatmap, dtype=np.float32)[:, :, None]
+    overlay = np.clip(base * (1.0 - alpha * weight) + colored * (alpha * weight), 0.0, 1.0)
+    return _caption((overlay * 255).astype(np.uint8), text).astype(np.float32) / 255.0
 
 
 def _visualize(maps, image, alpha):
-    heatmaps = np.concatenate([_label(_colormap(maps.maps[i]), maps.concepts[i]) for i in range(maps.num_concepts)], axis=1)
-
+    heatmaps = np.concatenate([_caption(_colormap(maps.maps[i]), maps.concepts[i]) for i in range(maps.num_concepts)], axis=1)
     base = _to_numpy(image)
-    overlay = base.copy()
-    colors = colormaps["tab10"](np.linspace(0, 1, max(maps.num_concepts, 1)))[:, :3]
-    if maps.num_concepts == 1:
-        colors = np.array([[1.0, 0.2, 0.0]])
-    for i in range(maps.num_concepts):
-        m = maps.maps[i].numpy()[:, :, None]
-        overlay = overlay * (1.0 - alpha * m) + colors[i] * (alpha * m)
-    return _to_comfy_image(heatmaps), _to_comfy_image(np.clip(overlay, 0.0, 1.0))
+    overlays = np.stack([_overlay_labeled(base, maps.maps[i].numpy(), maps.concepts[i], alpha) for i in range(maps.num_concepts)], axis=0)
+    return _to_comfy_image(heatmaps), _to_comfy_image(overlays)
 
 
 _COMMON_CONCEPT_WIDGETS = {
@@ -204,12 +208,9 @@ class ConceptAttentionVisualizerNode:
         name = concept_name.strip()
         if name and name in concept_maps.concepts:
             index = concept_maps.concepts.index(name)
-            colored = colormaps["plasma"](concept_maps.maps[index].numpy())[:, :, :3]
-            overlay = np.clip(base * (1.0 - alpha) + colored * alpha, 0.0, 1.0)
-        else:
-            _, overlay = _visualize(concept_maps, image, alpha)
-            return (overlay,)
-        return (_to_comfy_image(overlay),)
+            return (_to_comfy_image(_overlay_labeled(base, concept_maps.maps[index].numpy(), name, alpha)),)
+        _, overlays = _visualize(concept_maps, image, alpha)
+        return (overlays,)
 
 
 class ConceptSaliencyMapNode:

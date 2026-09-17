@@ -31,12 +31,12 @@ Copy this folder into `ComfyUI/custom_nodes/` and restart ComfyUI.
 
 1. Add `Concept Attention Model` after all LoRA/loader nodes and before `KSampler`.
 2. Connect its `concept_state` and the decoded image to `Concept Attention Maps`.
-3. Save `heatmaps` and `overlay`.
+3. Save `heatmaps` (one labeled panel per concept) and `overlay` (one labeled overlay image per concept).
 
 **Encode an existing image** — one node:
 
 1. Connect image, model, VAE, CLIP, prompt and concepts to `Concept Attention (encode image)`.
-2. Save `heatmaps` and `overlay`.
+2. Save `heatmaps` (one labeled panel per concept) and `overlay` (one labeled overlay image per concept).
 
 ## Settings
 
