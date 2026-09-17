@@ -1,557 +1,181 @@
 """
-Simplified ComfyUI nodes for Concept Attention based on original structure.
+ComfyUI nodes for ConceptAttention.
+
+Give it an image, a Flux.2 (Klein/dev) or Krea 2 model, a VAE, a CLIP, a prompt
+and a list of concepts. It returns a per-concept saliency grid and an overlay.
 """
 
-import torch
-import numpy as np
-from PIL import Image
 import logging
-from typing import Dict, List, Tuple, Any
-from .concept_attention import ConceptAttentionProcessor
 
-def _ensure_image_hw3(arr, target_hw=None):
-    """
-    arr: (H,W,3) 또는 (H,W) 또는 (N,3) 또는 (N,) 등 각종 입력을 받아
-         최종 (H,W,3) float32 [0..1] 로 변환.
-    """
-    a = np.asarray(arr)
+import numpy as np
+import torch
+from PIL import Image, ImageDraw
+from matplotlib import colormaps
 
-    # 1) torch.Tensor -> numpy
-    try:
-        import torch
-        if isinstance(arr, torch.Tensor):
-            a = arr.detach().float().cpu().numpy()
-    except Exception:
-        pass
-
-    # 2) (N,3) 또는 (N,)이면 정사각형으로 복원
-    if a.ndim == 2 and a.shape[1] in (1, 3):  # (N,1) or (N,3)
-        N = a.shape[0]
-        side = int(np.sqrt(N))
-        if side * side != N:
-            # 제곱수로 패딩
-            next_side = int(np.ceil(np.sqrt(N)))
-            pad = next_side * next_side - N
-            pad_axis = ((0, pad), (0, 0))
-            a = np.pad(a, pad_axis, mode="constant")
-            side = next_side
-        a = a.reshape(side, side, a.shape[1])
-
-    elif a.ndim == 1:  # (N,)
-        N = a.shape[0]
-        side = int(np.sqrt(N))
-        if side * side != N:
-            next_side = int(np.ceil(np.sqrt(N)))
-            pad = next_side * next_side - N
-            a = np.pad(a, (0, pad), mode="constant")
-            side = next_side
-        a = a.reshape(side, side)
-
-    # 3) (H,W) → (H,W,3) 그레이스케일 확장
-    if a.ndim == 2:
-        a = np.stack([a, a, a], axis=-1)
-
-    # 4) (H,W,1) → (H,W,3)
-    if a.ndim == 3 and a.shape[2] == 1:
-        a = np.repeat(a, 3, axis=2)
-
-    # 5) 타입/스케일 정규화
-    a = a.astype(np.float32)
-    mn, mx = float(a.min()), float(a.max())
-    if mx > mn:
-        a = (a - mn) / (mx - mn)
-    else:
-        a[:] = 0.0
-
-    # 6) 필요 시 리사이즈
-    if target_hw is not None:
-        H, W = target_hw
-        a_u8 = (a * 255.0).astype(np.uint8)
-        a_u8 = np.array(Image.fromarray(a_u8).resize((W, H), Image.BILINEAR))
-        if a_u8.ndim == 2:
-            a_u8 = np.stack([a_u8]*3, axis=-1)
-        a = a_u8.astype(np.float32) / 255.0
-
-    # 최종 보장: (H,W,3) float32 0..1
-    return a
-
-def to_preview_image(arr_1d_or_2d, target_hw=None):
-    """Legacy function - use _ensure_image_hw3 instead"""
-    return _ensure_image_hw3(arr_1d_or_2d, target_hw)
+from .concept_attention import ConceptMaps, compute_concept_attention
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_concepts(text):
+    return [c.strip() for c in text.replace("\n", ",").split(",") if c.strip()]
+
+
+def _to_numpy(image):
+    if isinstance(image, torch.Tensor):
+        image = image.detach().cpu().float().numpy()
+    image = np.asarray(image, dtype=np.float32)
+    if image.ndim == 4:
+        image = image[0]
+    return np.clip(image, 0.0, 1.0)
+
+
+def _to_comfy_image(array):
+    array = np.clip(np.asarray(array, dtype=np.float32), 0.0, 1.0)
+    return torch.from_numpy(array)[None, ...]
+
+
+def _colormap(heatmap):
+    rgba = colormaps["plasma"](np.asarray(heatmap, dtype=np.float32))
+    return (rgba[:, :, :3] * 255).astype(np.uint8)
+
+
+def _label(image, text):
+    image = Image.fromarray(image)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, image.height - 26, image.width, image.height), fill=(0, 0, 0))
+    draw.text((6, image.height - 22), text, fill=(255, 255, 255))
+    return np.asarray(image)
+
+
+def _tile_heatmaps(maps, concepts):
+    panels = [_label(_colormap(maps[i]), concepts[i]) for i in range(len(concepts))]
+    return np.concatenate(panels, axis=1)
+
+
+def _overlay_map(image, heatmap, alpha):
+    colored = colormaps["plasma"](np.asarray(heatmap, dtype=np.float32))[:, :, :3]
+    return np.clip(image * (1.0 - alpha) + colored * alpha, 0.0, 1.0)
+
+
+def _overlay_concepts(image, maps, alpha):
+    overlay = image.copy()
+    colors = colormaps["tab10"](np.linspace(0, 1, max(len(maps), 1)))[:, :3]
+    if len(maps) == 1:
+        colors = np.array([[1.0, 0.2, 0.0]])
+    for i in range(len(maps)):
+        m = np.asarray(maps[i], dtype=np.float32)[:, :, None]
+        overlay = overlay * (1.0 - alpha * m) + colors[i] * (alpha * m)
+    return np.clip(overlay, 0.0, 1.0)
+
+
 class ConceptAttentionNode:
-    """
-    Simplified ComfyUI node for concept attention.
-    Based on original ConceptAttention structure.
-    """
-    
-    RETURN_TYPES = ("CONCEPT_MAPS", "IMAGE")
-    RETURN_NAMES = ("concept_maps", "visualized_image")
-    FUNCTION = "generate_concept_attention"
     CATEGORY = "Concept Attention"
-    
+    RETURN_TYPES = ("CONCEPT_MAPS", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("concept_maps", "heatmaps", "overlay")
+    FUNCTION = "run"
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "model": ("MODEL",),
+                "vae": ("VAE",),
                 "clip": ("CLIP",),
                 "image": ("IMAGE",),
-                "prompt": ("STRING", {"multiline": True, "default": "A beautiful landscape"}),
-                "concept_list": ("STRING", {"multiline": True, "default": "woman, cat, white, lines, cane"}),
+                "prompt": ("STRING", {"multiline": True, "default": "A dragon on a hill."}),
+                "concepts": ("STRING", {"multiline": True, "default": "dragon, rock, sky, clouds"}),
+                "noise_timestep": ("INT", {"default": 2, "min": 0, "max": 20, "step": 1}),
+                "num_steps": ("INT", {"default": 4, "min": 1, "max": 50, "step": 1}),
+                "layer_start": ("INT", {"default": -1, "min": -1, "max": 200, "step": 1}),
+                "layer_end": ("INT", {"default": -1, "min": -1, "max": 200, "step": 1}),
+                "softmax": ("BOOLEAN", {"default": True}),
+                "temperature": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1000.0, "step": 0.01}),
+                "alpha": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
             }
         }
-    
-    def __init__(self):
-        self.processor = None
-        
-    def generate_concept_attention(self, model, clip, image, prompt, concept_list):
-        """
-        Generate concept attention maps using simplified approach.
-        """
-        try:
-            # Convert concept_list string to list
-            if isinstance(concept_list, str):
-                concept_list = [concept.strip() for concept in concept_list.split(',')]
-            elif isinstance(concept_list, list):
-                concept_list = [str(concept).strip() for concept in concept_list]
-            else:
-                concept_list = []
-            
-            logger.info(f"DEBUG: Extracted concepts from prompt: {concept_list}")
-            
-            # Initialize processor if not exists
-            if self.processor is None:
-                self.processor = ConceptAttentionProcessor(model, device="cuda")
-            
-            # Process image to get concept maps
-            concept_maps = self.processor.process_image(image, concept_list, clip)
-            
-            # Convert to ComfyUI format with guaranteed (H,W,3) output
-            image_shape = image.shape if hasattr(image, 'shape') else None
-            saliency_maps, visualized_image = self._convert_to_comfyui_format(concept_maps, image_shape)
-            
-            logger.info(f"DEBUG: processor.process_image returned: {type(concept_maps)}")
-            logger.info(f"DEBUG: saliency_maps keys: {list(saliency_maps.keys()) if saliency_maps else None}")
-            logger.info(f"DEBUG: visualized_image shape: {visualized_image.shape}")
-            
-            return saliency_maps, visualized_image
-            
-        except Exception as e:
-            logger.error(f"Error in SimpleConceptAttentionNode: {e}")
-            # Return empty results on error
-            return {}, image
-    
-    def _convert_to_comfyui_format(self, concept_maps: Dict[str, torch.Tensor], image_shape=None) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
-        """
-        Convert concept maps to ComfyUI format with guaranteed (H,W,3) output.
-        Returns: (fixed_maps, visualized_image)
-        """
-        try:
-            if not concept_maps:
-                logger.warning("WARNING: saliency_maps is empty, returning empty ConceptMaps")
-                # Create fallback image
-                fallback_img = _ensure_image_hw3(np.zeros((1024, 1024)), target_hw=(1024, 1024))
-                return {}, fallback_img
-            
-            # Get target dimensions from image shape
-            if image_shape is not None and len(image_shape) >= 2:
-                target_h, target_w = image_shape[:2]
-            else:
-                target_h, target_w = 1024, 1024
-            
-            # Convert all concept maps to guaranteed (H,W,3) format
-            fixed_maps = {}
-            for concept, attention_map in concept_maps.items():
-                try:
-                    fixed_maps[concept] = _ensure_image_hw3(attention_map, target_hw=(target_h, target_w))
-                except Exception as e:
-                    logger.error(f"Error processing concept '{concept}': {e}")
-                    # Create fallback
-                    fixed_maps[concept] = _ensure_image_hw3(np.zeros((32, 32)), target_hw=(target_h, target_w))
-            
-            # Create visualized image from first concept map
-            if fixed_maps:
-                visualized_image = next(iter(fixed_maps.values()))  # (H,W,3) float32
-            else:
-                visualized_image = _ensure_image_hw3(np.zeros((target_h, target_w)), target_hw=(target_h, target_w))
-            
-            logger.info(f"DEBUG: Converted concept_maps with keys: {list(fixed_maps.keys())}")
-            logger.info(f"DEBUG: visualized_image shape: {visualized_image.shape}")
-            
-            return fixed_maps, visualized_image
-            
-        except Exception as e:
-            logger.error(f"Error converting concept maps: {e}")
-            fallback_img = _ensure_image_hw3(np.zeros((1024, 1024)), target_hw=(1024, 1024))
-            return {}, fallback_img
-    
-    def _create_simple_visualization(self, saliency_maps: Dict[str, torch.Tensor], 
-                                   image: torch.Tensor) -> torch.Tensor:
-        """
-        Create simple visualization of concept attention maps.
-        """
-        try:
-            if not saliency_maps:
-                logger.warning("WARNING: saliency_maps is empty, returning empty ConceptMaps")
-                return image
-            
-            # Convert image to numpy if needed
-            if isinstance(image, torch.Tensor):
-                img_np = image.squeeze().cpu().numpy()
-                if len(img_np.shape) == 3 and img_np.shape[0] == 3:  # CHW format
-                    img_np = np.transpose(img_np, (1, 2, 0))
-            else:
-                img_np = np.array(image)
-            
-            # Ensure image is in correct format
-            if len(img_np.shape) == 2:  # Grayscale
-                img_np = np.stack([img_np] * 3, axis=-1)
-            elif len(img_np.shape) == 3 and img_np.shape[-1] == 1:  # Single channel
-                img_np = np.repeat(img_np, 3, axis=-1)
-            
-            # Normalize image to 0-1 range
-            img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-8)
-            
-            # Create overlay for each concept
-            overlay = img_np.copy()
-            colors = [
-                [1.0, 0.0, 0.0],  # Red
-                [0.0, 1.0, 0.0],  # Green
-                [0.0, 0.0, 1.0],  # Blue
-                [1.0, 1.0, 0.0],  # Yellow
-                [1.0, 0.0, 1.0],  # Magenta
-            ]
-            
-            for i, (concept, attention_map) in enumerate(saliency_maps.items()):
-                if i < len(colors):
-                    color = colors[i]
-                    
-                    # Ensure attention_map is numpy array
-                    if isinstance(attention_map, torch.Tensor):
-                        attention_map = attention_map.cpu().numpy()
-                    
-                    # Use _ensure_image_hw3 for robust conversion
-                    preview_img = _ensure_image_hw3(attention_map, target_hw=(img_np.shape[0], img_np.shape[1]))
-                    
-                    # Use the first channel as attention map
-                    attention_resized = preview_img[:, :, 0]
-                    
-                    # Normalize back to 0-1 range
-                    attention_resized = attention_resized.astype(np.float32) / 255.0
-                    
-                    # Create colored overlay
-                    for c in range(3):
-                        overlay[:, :, c] += attention_resized * color[c] * 0.3
-            
-            # Clip to valid range
-            overlay = np.clip(overlay, 0, 1)
-            
-            # Convert back to tensor
-            if len(overlay.shape) == 3:
-                overlay = np.transpose(overlay, (2, 0, 1))  # HWC to CHW
-            
-            return torch.from_numpy(overlay).unsqueeze(0)
-            
-        except Exception as e:
-            logger.error(f"Error creating visualization: {e}")
-            return image
-    
-    def extract_concept_map(self, concept_maps: Dict[str, torch.Tensor], 
-                          concept_name: str) -> torch.Tensor:
-        """
-        Extract specific concept map.
-        """
-        try:
-            if not concept_maps:
-                raise ValueError(f"Concept '{concept_name}' not found in concept_maps. Available: None")
-            
-            if concept_name not in concept_maps:
-                available = list(concept_maps.keys()) if concept_maps else "None"
-                raise ValueError(f"Concept '{concept_name}' not found in concept_maps. Available: {available}")
-            
-            return torch.from_numpy(concept_maps[concept_name])
-            
-        except Exception as e:
-            logger.error(f"Error extracting concept map: {e}")
-            raise ValueError(f"Failed to extract concept map for '{concept_name}': {e}")
-    
-    def perform_segmentation(self, concept_maps: Dict[str, torch.Tensor], 
-                           concept_list: List[str], image: torch.Tensor) -> torch.Tensor:
-        """
-        Perform segmentation based on concept maps.
-        """
-        try:
-            if not concept_maps:
-                logger.warning("WARNING: saliency_maps is empty, returning empty ConceptMaps")
-                return image
-            
-            # Create segmentation mask
-            segmentation_mask = torch.zeros_like(image[0, 0])  # Single channel mask
-            
-            for i, concept in enumerate(concept_list):
-                if concept in concept_maps:
-                    concept_map = torch.from_numpy(concept_maps[concept])
-                    # Assign different values for different concepts
-                    segmentation_mask += concept_map * (i + 1)
-            
-            # Normalize segmentation mask
-            if segmentation_mask.max() > 0:
-                segmentation_mask = segmentation_mask / segmentation_mask.max()
-            
-            return segmentation_mask.unsqueeze(0).unsqueeze(0)
-            
-        except Exception as e:
-            logger.error(f"Error in segmentation: {e}")
-            return image
 
+    def run(self, model, vae, clip, image, prompt, concepts, noise_timestep, num_steps,
+            layer_start, layer_end, softmax, temperature, alpha, seed):
+        names = _parse_concepts(concepts)
+        maps = compute_concept_attention(
+            model, vae, clip, image, prompt, names,
+            layer_start=layer_start, layer_end=layer_end, num_steps=num_steps,
+            noise_timestep=noise_timestep, seed=seed, softmax=softmax,
+            temperature=temperature,
+        )
+        logger.info("ConceptAttention: %d concepts over %dx%d", maps.num_concepts, maps.width, maps.height)
 
-class ConceptSaliencyMapNode:
-    """
-    Node for extracting saliency maps from concept attention.
-    """
-    
-    RETURN_TYPES = ("MASK", "IMAGE")
-    RETURN_NAMES = ("mask", "saliency_image")
-    FUNCTION = "extract_saliency_map"
-    CATEGORY = "Concept Attention"
-    
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "concept_maps": ("CONCEPT_MAPS",),
-                "concept_name": ("STRING", {"default": "woman"}),
-                "threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-            }
-        }
-    
-    def __init__(self):
-        pass
-    
-    def extract_saliency_map(self, concept_maps, concept_name, threshold=0.5):
-        """
-        Extract saliency map for a specific concept.
-        """
-        try:
-            if not concept_maps or concept_name not in concept_maps:
-                logger.warning(f"Concept '{concept_name}' not found in concept_maps")
-                return None, None
-            
-            concept_map = concept_maps[concept_name]
-            
-            # Apply threshold
-            saliency_map = (concept_map > threshold).float()
-            
-            # Create visualization
-            saliency_image = self._create_saliency_visualization(concept_map, threshold)
-            
-            return saliency_map, saliency_image
-            
-        except Exception as e:
-            logger.error(f"Error extracting saliency map: {e}")
-            return None, None
-    
-    def _create_saliency_visualization(self, concept_map, threshold):
-        """
-        Create visualization of saliency map.
-        """
-        try:
-            # Normalize concept map
-            normalized_map = (concept_map - concept_map.min()) / (concept_map.max() - concept_map.min() + 1e-8)
-            
-            # Apply threshold
-            thresholded_map = (normalized_map > threshold).float()
-            
-            # Create colored visualization
-            visualization = torch.stack([
-                thresholded_map,  # Red channel
-                torch.zeros_like(thresholded_map),  # Green channel
-                torch.zeros_like(thresholded_map)   # Blue channel
-            ], dim=0)
-            
-            return visualization
-            
-        except Exception as e:
-            logger.error(f"Error creating saliency visualization: {e}")
-            return None
-
-
-class ConceptSegmentationNode:
-    """
-    Node for performing segmentation based on concept attention.
-    """
-    
-    RETURN_TYPES = ("MASK", "IMAGE")
-    RETURN_NAMES = ("segmentation_mask", "segmented_image")
-    FUNCTION = "perform_segmentation"
-    CATEGORY = "Concept Attention"
-    
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "concept_maps": ("CONCEPT_MAPS",),
-                "image": ("IMAGE",),
-                "concepts": ("STRING", {"multiline": True, "default": "woman, cat, white, lines, cane"}),
-            }
-        }
-    
-    def __init__(self):
-        pass
-    
-    def perform_segmentation(self, concept_maps, image, concepts):
-        """
-        Perform segmentation based on concept maps.
-        """
-        try:
-            if not concept_maps:
-                logger.warning("No concept maps available for segmentation")
-                return None, image
-            
-            # Create segmentation mask
-            segmentation_mask = torch.zeros_like(image[0, 0])  # Single channel mask
-            
-            for i, concept in enumerate(concepts):
-                if concept in concept_maps:
-                    concept_map = concept_maps[concept]
-                    # Assign different values for different concepts
-                    segmentation_mask += concept_map * (i + 1)
-            
-            # Normalize segmentation mask
-            if segmentation_mask.max() > 0:
-                segmentation_mask = segmentation_mask / segmentation_mask.max()
-            
-            # Create segmented image
-            segmented_image = self._create_segmented_image(image, segmentation_mask)
-            
-            return segmentation_mask.unsqueeze(0).unsqueeze(0), segmented_image
-            
-        except Exception as e:
-            logger.error(f"Error in segmentation: {e}")
-            return None, image
-    
-    def _create_segmented_image(self, image, segmentation_mask):
-        """
-        Create segmented image visualization.
-        """
-        try:
-            # Convert to numpy if needed
-            if isinstance(image, torch.Tensor):
-                img_np = image.squeeze().cpu().numpy()
-                if img_np.shape[0] == 3:  # CHW format
-                    img_np = np.transpose(img_np, (1, 2, 0))
-            else:
-                img_np = np.array(image)
-            
-            # Normalize image
-            img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-8)
-            
-            # Apply segmentation mask
-            segmented = img_np * segmentation_mask.cpu().numpy()
-            
-            # Convert back to tensor
-            if len(segmented.shape) == 3:
-                segmented = np.transpose(segmented, (2, 0, 1))  # HWC to CHW
-            
-            return torch.from_numpy(segmented).unsqueeze(0)
-            
-        except Exception as e:
-            logger.error(f"Error creating segmented image: {e}")
-            return image
+        base = _to_numpy(image)
+        heatmaps = _tile_heatmaps(maps.maps.numpy(), maps.concepts)
+        overlay = _overlay_concepts(base, maps.maps.numpy(), alpha)
+        return maps, _to_comfy_image(heatmaps), _to_comfy_image(overlay)
 
 
 class ConceptAttentionVisualizerNode:
-    """
-    Node for visualizing concept attention maps.
-    """
-    
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("visualized_image",)
-    FUNCTION = "visualize_attention"
     CATEGORY = "Concept Attention"
-    
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("overlay",)
+    FUNCTION = "run"
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "concept_maps": ("CONCEPT_MAPS",),
                 "image": ("IMAGE",),
+                "concept_name": ("STRING", {"default": ""}),
+                "alpha": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
             }
         }
-    
-    def __init__(self):
-        pass
-    
-    def visualize_attention(self, concept_maps, image):
-        """
-        Create visualization of concept attention maps.
-        """
-        try:
-            if not concept_maps:
-                logger.warning("No concept maps available for visualization")
-                return image
-            
-            # Convert image to numpy if needed
-            if isinstance(image, torch.Tensor):
-                img_np = image.squeeze().cpu().numpy()
-                if img_np.shape[0] == 3:  # CHW format
-                    img_np = np.transpose(img_np, (1, 2, 0))
-            else:
-                img_np = np.array(image)
-            
-            # Normalize image
-            img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-8)
-            
-            # Create overlay for each concept
-            overlay = img_np.copy()
-            colors = [
-                [1.0, 0.0, 0.0],  # Red
-                [0.0, 1.0, 0.0],  # Green
-                [0.0, 0.0, 1.0],  # Blue
-                [1.0, 1.0, 0.0],  # Yellow
-                [1.0, 0.0, 1.0],  # Magenta
-            ]
-            
-            for i, (concept, attention_map) in enumerate(concept_maps.items()):
-                if i < len(colors):
-                    color = colors[i]
-                    # Resize attention map to image size
-                    attention_resized = np.array(Image.fromarray(attention_map).resize(
-                        (img_np.shape[1], img_np.shape[0]), Image.BILINEAR
-                    ))
-                    
-                    # Create colored overlay
-                    for c in range(3):
-                        overlay[:, :, c] += attention_resized * color[c] * 0.3
-            
-            # Clip to valid range
-            overlay = np.clip(overlay, 0, 1)
-            
-            # Convert back to tensor
-            if len(overlay.shape) == 3:
-                overlay = np.transpose(overlay, (2, 0, 1))  # HWC to CHW
-            
-            return torch.from_numpy(overlay).unsqueeze(0)
-            
-        except Exception as e:
-            logger.error(f"Error creating attention visualization: {e}")
-            return image
+
+    def run(self, concept_maps, image, concept_name, alpha):
+        base = _to_numpy(image)
+        name = concept_name.strip()
+        if name and name in concept_maps.concepts:
+            overlay = _overlay_map(base, concept_maps.maps[concept_maps.concepts.index(name)].numpy(), alpha)
+        else:
+            overlay = _overlay_concepts(base, concept_maps.maps.numpy(), alpha)
+        return (_to_comfy_image(overlay),)
 
 
-# ComfyUI node registration
+class ConceptSaliencyMapNode:
+    CATEGORY = "Concept Attention"
+    RETURN_TYPES = ("MASK", "IMAGE")
+    RETURN_NAMES = ("mask", "saliency")
+    FUNCTION = "run"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "concept_maps": ("CONCEPT_MAPS",),
+                "concept_name": ("STRING", {"default": ""}),
+                "threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+            }
+        }
+
+    def run(self, concept_maps, concept_name, threshold):
+        if not concept_maps.concepts:
+            raise ValueError("concept_maps is empty")
+        name = concept_name.strip()
+        index = concept_maps.concepts.index(name) if name in concept_maps.concepts else 0
+        heatmap = concept_maps.maps[index].numpy()
+        mask = (heatmap > threshold).astype(np.float32)
+        colored = _colormap(heatmap)
+        colored[mask < 0.5] = 0
+        return torch.from_numpy(mask)[None, ...], _to_comfy_image(colored)
+
+
 NODE_CLASS_MAPPINGS = {
     "ConceptAttentionNode": ConceptAttentionNode,
-    "ConceptSaliencyMapNode": ConceptSaliencyMapNode,
-    "ConceptSegmentationNode": ConceptSegmentationNode,
     "ConceptAttentionVisualizerNode": ConceptAttentionVisualizerNode,
+    "ConceptSaliencyMapNode": ConceptSaliencyMapNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ConceptAttentionNode": "Concept Attention",
-    "ConceptSaliencyMapNode": "Concept Saliency Map",
-    "ConceptSegmentationNode": "Concept Segmentation",
     "ConceptAttentionVisualizerNode": "Concept Attention Visualizer",
+    "ConceptSaliencyMapNode": "Concept Saliency Map",
 }

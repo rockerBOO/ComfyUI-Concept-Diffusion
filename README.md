@@ -1,129 +1,74 @@
 # ComfyUI-Concept-Diffusion
-# 💥💥💥Fixing Now!!!💥💥💥
-ComfyUI custom node implementation of ConceptAttention: Diffusion Transformers Learn Highly Interpretable Features.
 
-This node allows you to generate high-quality saliency maps that precisely locate textual concepts within images using diffusion transformer attention layers.
+ComfyUI nodes for [ConceptAttention: Diffusion Transformers Learn Highly
+Interpretable Features](https://arxiv.org/abs/2502.04320).
 
-## Features
+ConceptAttention produces sharp per-concept saliency maps from the *attention
+output space* of a multi-modal diffusion transformer. It needs no training: each
+concept is embedded as a token, run through a parallel residual stream that
+reuses the model's own text attention weights, and scored against the image
+patch attention outputs by a linear projection.
 
-- **ConceptAttention Node**: Extract concept embeddings from diffusion transformer attention layers
-- **Saliency Map Generation**: Generate precise saliency maps for textual concepts
-- **Zero-shot Segmentation**: Perform zero-shot semantic segmentation using concept attention
-- **Multi-concept Support**: Handle multiple concepts simultaneously
-- **Video Support**: Works with video generation models (CogVideoX)
-- **Visualization Tools**: Overlay attention maps on original images
-- **Flexible Thresholding**: Multiple threshold methods for saliency maps
+This is a real implementation. It runs the concept stream with the model's own
+(possibly quantized) modules, so **nvfp4 and int8-convrot** checkpoints work
+through the normal ComfyUI ops.
 
-## Installation
+## Supported models
 
-1. Clone this repository to your ComfyUI custom_nodes folder:
-   ```bash
-   git clone https://github.com/Junst/ComfyUI-Concept-Diffusion.git
-   cd ComfyUI-Concept-Diffusion
-   ```
+| Family | ComfyUI class | Text encoder | VAE |
+|--------|---------------|--------------|-----|
+| **Krea 2** | `comfy.ldm.krea2.SingleStreamDiT` | Qwen3-VL-4B (`krea2`) | Wan 2.1 |
+| **Flux.2 Klein / Flux.2** | `comfy.ldm.flux.Flux` (`global_modulation`) | Qwen3-4B/8B (`flux2`) or Mistral3 (`flux2`) | Flux.2 |
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Restart ComfyUI
+Krea 2 is a single-stream MMDiT, so the concept attention is adapted to it:
+concept queries attend to `[concept keys, image keys]` while the image output
+comes from the normal `[text + image]` attention. Flux.2 uses the paper's
+double-stream formulation directly.
 
 ## Nodes
 
-### ConceptAttentionNode
-Main node for generating concept attention maps from diffusion models.
+### Concept Attention
+Give it a `MODEL`, `VAE`, `CLIP`, an `IMAGE`, a `prompt`, and a comma separated
+`concepts` list. It encodes the image, adds noise at `noise_timestep` (of
+`num_steps`), runs one forward pass, and returns:
 
-**Inputs:**
-- `model`: Diffusion model (MODEL)
-- `clip`: CLIP text encoder (CLIP)
-- `image`: Input image (IMAGE)
-- `concepts`: Comma-separated list of concepts (STRING)
-- `num_inference_steps`: Number of inference steps (INT)
-- `seed`: Random seed (INT, optional)
+- `concept_maps` – `CONCEPT_MAPS`, normalized `(C, H, W)` maps
+- `heatmaps` – an `IMAGE` row of per-concept plasma heatmaps with labels
+- `overlay` – the input image with all concept maps tinted and blended
 
-**Outputs:**
-- `concept_maps`: Generated concept attention maps (CONCEPT_MAPS)
-- `visualized_image`: Visualization of all concept maps (IMAGE)
+`layer_start` / `layer_end` select the transformer blocks to average over (`-1`
+= the last 4 double/single blocks). `softmax` (on by default) normalizes across
+concepts per pixel. `temperature` divides the scores before softmax.
 
-### ConceptSaliencyMapNode
-Extract individual concept saliency maps and convert to masks.
+### Concept Attention Visualizer
+Takes `concept_maps` and an `IMAGE`. Set `concept_name` to a single concept to
+overlay just that map, or leave it empty to tint all concepts.
 
-**Inputs:**
-- `concept_maps`: Concept attention maps (CONCEPT_MAPS)
-- `concept_name`: Name of concept to extract (STRING)
-- `threshold`: Threshold for mask generation (FLOAT)
+### Concept Saliency Map
+Takes `concept_maps` and thresholds one concept into a `MASK` plus a colored
+saliency `IMAGE`.
 
-**Outputs:**
-- `mask`: Binary mask for the concept (MASK)
-- `saliency_image`: Saliency map visualization (IMAGE)
+## Usage
 
-### ConceptSegmentationNode
-Perform zero-shot semantic segmentation using concept attention.
+1. Load an image, a Krea 2 or Flux.2 (Klein) diffusion model, its text encoder,
+   and its VAE.
+2. Connect them to **Concept Attention** with a prompt and a concept list.
+3. Save the `heatmaps` and/or `overlay` outputs.
 
-**Inputs:**
-- `concept_maps`: Concept attention maps (CONCEPT_MAPS)
-- `image`: Original image (IMAGE)
-- `concepts`: List of concepts for segmentation (STRING)
+See `example_workflow.json` for a Krea 2 graph. To use Flux.2 Klein, switch the
+`UNETLoader` to a Klein model, set the `CLIPLoader` type to `flux2` with
+`qwen_3_4b` (4B) or `qwen_3_8b` (9B), and point `VAELoader` at the Flux.2 VAE.
 
-**Outputs:**
-- `segmentation_mask`: Segmentation mask (MASK)
-- `segmented_image`: Colored segmentation result (IMAGE)
+## Notes
 
-### ConceptAttentionVisualizerNode
-Visualize concept attention maps overlaid on the original image.
-
-**Inputs:**
-- `concept_maps`: Concept attention maps (CONCEPT_MAPS)
-- `image`: Original image (IMAGE)
-- `overlay_alpha`: Transparency of overlay (FLOAT)
-
-**Outputs:**
-- `visualized_image`: Image with attention overlay (IMAGE)
-
-## Usage Example
-
-1. Load an image using `LoadImage` node
-2. Load a diffusion model (Flux, SD3, etc.) using `CheckpointLoaderSimple`
-3. Connect the model, CLIP, and image to `ConceptAttentionNode`
-4. Specify concepts like "person, car, tree, sky, building"
-5. Use `ConceptSaliencyMapNode` to extract specific concept maps
-6. Use `ConceptSegmentationNode` for zero-shot segmentation
-7. Use `ConceptAttentionVisualizerNode` for visualization
-8. Save results using `SaveImage` nodes
-
-## Example Workflow
-
-See `example_workflow.json` for a complete ComfyUI workflow example.
-
-## Testing
-
-Run the test script to verify the nodes work correctly:
-
-```bash
-python test_nodes.py
-```
-
-## Technical Details
-
-This implementation is based on the ConceptAttention paper which shows that:
-
-1. Multi-modal diffusion transformers (DiTs) have rich representations
-2. Linear projections in the attention output space produce sharper saliency maps
-3. Concept embeddings can be extracted without additional training
-4. The method works for both image and video generation models
-
-## Supported Models
-
-- Flux (Flux1-dev, Flux1-schnell)
-- Stable Diffusion 3/3.5
-- CogVideoX (for video)
-- Other DiT-based diffusion models
+- The paper's `encode_image` defaults are `noise_timestep=2`, `num_steps=4`.
+- Increase `num_steps`/`noise_timestep` for noisier attribution.
 
 ## Based on
 
-[ConceptAttention: Diffusion Transformers Learn Highly Interpretable Features](https://arxiv.org/pdf/2502.04320)
+[ConceptAttention](https://github.com/helblazer811/ConceptAttention) ·
+[arXiv:2502.04320](https://arxiv.org/abs/2502.04320)
 
 ## License
 
-MIT License
+MIT
