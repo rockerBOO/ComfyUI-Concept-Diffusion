@@ -15,7 +15,12 @@ int8-convrot models.
 
 ## Install
 
-Copy this folder into `ComfyUI/custom_nodes/` and restart ComfyUI.
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/rockerBOO/ComfyUI-Concept-Diffusion.git
+```
+
+Restart ComfyUI.
 
 ## Nodes
 
