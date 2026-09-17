@@ -1,75 +1,53 @@
 # ComfyUI-Concept-Diffusion
 
-ComfyUI nodes for [ConceptAttention: Diffusion Transformers Learn Highly
-Interpretable Features](https://arxiv.org/abs/2502.04320).
-
-ConceptAttention produces sharp per-concept saliency maps from the *attention
-output space* of a multi-modal diffusion transformer. It needs no training: each
-concept is embedded as a token, run through a parallel residual stream that
-reuses the model's own text attention weights, and scored against the image
-patch attention outputs by a linear projection.
-
-Capture is observational — it never changes what the model produces — and it
-runs through the model's own (possibly quantized) modules, so **nvfp4 and
-int8-convrot** checkpoints work.
+Per-concept saliency maps for diffusion transformers, from
+[ConceptAttention](https://arxiv.org/abs/2502.04320). Works with nvfp4 and
+int8-convrot models.
 
 ## Supported models
 
-| Family | ComfyUI class | Text encoder | VAE |
-|--------|---------------|--------------|-----|
-| **Krea 2** | `comfy.ldm.krea2.SingleStreamDiT` | Qwen3-VL-4B (`krea2`) | Wan 2.1 |
-| **Flux.2 Klein / Flux.2** | `comfy.ldm.flux.Flux` (`global_modulation`) | Qwen3-4B/8B (`flux2`) or Mistral3 (`flux2`) | Flux.2 |
-
-Krea 2 is a single-stream MMDiT, so concept queries attend to
-`[concept keys, image keys]` while the image output comes from the normal
-`[text + image]` attention. Flux.2 uses the paper's double-stream formulation.
+| Model | Text encoder | VAE |
+|-------|--------------|-----|
+| Krea 2 | Qwen3-VL-4B (`krea2`) | Wan 2.1 |
+| Flux.2 Klein / Flux.2 | Qwen3-4B/8B (`flux2`) | Flux.2 |
 
 ## Install
 
-Copy this folder into `ComfyUI/custom_nodes/` and restart ComfyUI. Only
-`torch`, `numpy`, `Pillow` and `matplotlib` are used (all already present in a
-normal ComfyUI install).
-
-## Two modes
-
-### Generate (the paper's main result)
-
-`Concept Attention Model` patches a `MODEL`. Sample normally with `KSampler`,
-then `Concept Attention Maps` turns the attention collected across every
-denoising step into heatmaps for the generated image.
-
-```
-UNETLoader ─► LoraLoader ─┐
-                          ├─ Concept Attention Model ─ model ─► KSampler ─► VAEDecode ─┐
-CLIPLoader ───────────────┘            │ concept_state                                  │
-                                       └──────► Concept Attention Maps ◄────────────────┘
-                                                        │ heatmaps / overlay
-```
-
-### Encode (attribute an existing image)
-
-`Concept Attention (encode image)` does it in one node: VAE-encode the image,
-add noise at `noise_timestep` of `num_steps`, run one forward pass, and return
-the maps plus an overlay.
+Copy this folder into `ComfyUI/custom_nodes/` and restart ComfyUI.
 
 ## Nodes
 
-- **Concept Attention (encode image)** — image in, `concept_maps` + labeled
-  `heatmaps` + `overlay` out.
-- **Concept Attention Model (generate)** — `MODEL` + `CLIP` + concept list in,
-  patched `MODEL` + `concept_state` out.
-- **Concept Attention Maps** — `concept_state` + decoded `IMAGE` in, maps out.
-- **Concept Attention Visualizer** — overlay one concept (or all) onto an image.
-- **Concept Saliency Map** — threshold one concept into a `MASK` + saliency image.
+| Node | Inputs | Outputs |
+|------|--------|---------|
+| Concept Attention Model | `MODEL`, `CLIP`, `concepts` | `MODEL`, `concept_state` |
+| Concept Attention Maps | `concept_state`, `IMAGE` | `concept_maps`, `heatmaps`, `overlay` |
+| Concept Attention (encode image) | `MODEL`, `VAE`, `CLIP`, `IMAGE`, `prompt`, `concepts` | `concept_maps`, `heatmaps`, `overlay` |
+| Concept Attention Visualizer | `concept_maps`, `IMAGE` | `overlay` |
+| Concept Saliency Map | `concept_maps` | `MASK`, `saliency` |
+
+## Usage
+
+**Generate** — collect concept attention while sampling:
+
+1. Add `Concept Attention Model` after all LoRA/loader nodes and before `KSampler`.
+2. Connect its `concept_state` and the decoded image to `Concept Attention Maps`.
+3. Save `heatmaps` and `overlay`.
+
+**Encode an existing image** — one node:
+
+1. Connect image, model, VAE, CLIP, prompt and concepts to `Concept Attention (encode image)`.
+2. Save `heatmaps` and `overlay`.
 
 ## Settings
 
-- `temperature` — defaults to **1000**, the paper's Flux.2 value. Lower it
-  toward `1` for sharper, more binary maps; raise it for smoother maps.
-- `softmax` — normalizes across concepts per pixel (keep on).
-- `layer_start` / `layer_end` — which transformer blocks to average over.
-  `-1` = the last 4 blocks.
-- `noise_timestep` / `num_steps` — encode mode only; the paper uses `2` and `4`.
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `concepts` | — | Comma separated. Use words that appear in the prompt. |
+| `temperature` | `1000` | Lower for sharper maps, raise for smoother. |
+| `layer_start` / `layer_end` | `-1` | `-1` = the last 4 transformer blocks. |
+| `softmax` | `true` | Normalize across concepts per pixel. |
+| `noise_timestep` / `num_steps` | `2` / `4` | Encode mode only. |
+| `alpha` | `0.5` | Overlay opacity. |
 
 ## Example workflows
 
@@ -77,30 +55,9 @@ In [`example_workflows/`](example_workflows):
 
 | File | Description |
 |------|-------------|
-| `generate_krea2.json` | Generate + capture, Krea 2 (UI format) |
-| `generate_krea2_api.json` | Same graph in API format (`POST /prompt`) |
-| `encode_image.json` | Attribute an existing image (UI format) |
-
-## Gotchas
-
-- **LoRA ordering.** A LoRA must come *before* `Concept Attention Model`, and
-  `Concept Attention Model` must be the **last model node** into `KSampler`. If
-  they are wired in parallel, the sampler runs the unpatched model and nothing is
-  collected.
-- **Concepts must appear in the prompt.** A concept that isn't in the prompt
-  (e.g. `dragon` on a photo of a woman) produces a diffuse, unrelated map. That's
-  expected.
-- **Fresh per run.** `Concept Attention Model` is marked non-cacheable, so each
-  run collects into a new state. Reusing one `concept_state` across two samplers
-  in the same graph would mix them.
-- **Map resolution** is the model's latent token grid (e.g. 64×64 for Krea 2 at
-  1024), upsampled to the image. `temperature` controls softness, not resolution.
-- When CFG is active, only the positive/cond batch is scored.
-
-## Based on
-
-[ConceptAttention](https://github.com/helblazer811/ConceptAttention) ·
-[arXiv:2502.04320](https://arxiv.org/abs/2502.04320)
+| `generate_krea2.json` | Krea 2, generate + capture (UI) |
+| `generate_krea2_api.json` | Same graph, API format |
+| `encode_image.json` | Attribute an existing image (UI) |
 
 ## License
 
