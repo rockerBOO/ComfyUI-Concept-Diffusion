@@ -9,9 +9,9 @@ concept is embedded as a token, run through a parallel residual stream that
 reuses the model's own text attention weights, and scored against the image
 patch attention outputs by a linear projection.
 
-This is a real implementation. It runs the concept stream with the model's own
-(possibly quantized) modules, so **nvfp4 and int8-convrot** checkpoints work
-through the normal ComfyUI ops.
+Capture is observational — it never changes what the model produces — and it
+runs through the model's own (possibly quantized) modules, so **nvfp4 and
+int8-convrot** checkpoints work.
 
 ## Supported models
 
@@ -20,49 +20,55 @@ through the normal ComfyUI ops.
 | **Krea 2** | `comfy.ldm.krea2.SingleStreamDiT` | Qwen3-VL-4B (`krea2`) | Wan 2.1 |
 | **Flux.2 Klein / Flux.2** | `comfy.ldm.flux.Flux` (`global_modulation`) | Qwen3-4B/8B (`flux2`) or Mistral3 (`flux2`) | Flux.2 |
 
-Krea 2 is a single-stream MMDiT, so the concept attention is adapted to it:
-concept queries attend to `[concept keys, image keys]` while the image output
-comes from the normal `[text + image]` attention. Flux.2 uses the paper's
-double-stream formulation directly.
+Krea 2 is a single-stream MMDiT, so concept queries attend to
+`[concept keys, image keys]` while the image output comes from the normal
+`[text + image]` attention. Flux.2 uses the paper's double-stream formulation.
+
+## Two modes
+
+### Generate (the paper's main result)
+
+`Concept Attention Model` patches a MODEL. Sample normally with `KSampler`, then
+`Concept Attention Maps` turns the attention collected across every denoising
+step into heatmaps for the generated image.
+
+```
+UNETLoader ─┐
+            ├─ Concept Attention Model ── model ──► KSampler ──► VAEDecode ──┐
+CLIPLoader ─┘            │ concept_state                                     │
+                         └────────────────► Concept Attention Maps ◄─────────┘
+                                                    │ heatmaps / overlay
+```
+
+See `example_workflow.json`.
+
+### Encode (attribute an existing image)
+
+`Concept Attention (encode image)` does it in one node: VAE-encode the image,
+add noise at `noise_timestep` of `num_steps`, run one forward pass, and return
+the maps plus an overlay.
+
+See `example_workflow_encode.json`.
 
 ## Nodes
 
-### Concept Attention
-Give it a `MODEL`, `VAE`, `CLIP`, an `IMAGE`, a `prompt`, and a comma separated
-`concepts` list. It encodes the image, adds noise at `noise_timestep` (of
-`num_steps`), runs one forward pass, and returns:
-
-- `concept_maps` – `CONCEPT_MAPS`, normalized `(C, H, W)` maps
-- `heatmaps` – an `IMAGE` row of per-concept plasma heatmaps with labels
-- `overlay` – the input image with all concept maps tinted and blended
+- **Concept Attention (encode image)** — image in, `concept_maps` +
+  labeled `heatmaps` + `overlay` out.
+- **Concept Attention Model (generate)** — MODEL + CLIP + concept list in,
+  patched MODEL + `concept_state` out.
+- **Concept Attention Maps** — `concept_state` + decoded IMAGE in, maps out.
+- **Concept Attention Visualizer** — overlay one concept (or all) onto an image.
+- **Concept Saliency Map** — threshold one concept into a `MASK` + saliency image.
 
 `layer_start` / `layer_end` select the transformer blocks to average over (`-1`
-= the last 4 double/single blocks). `softmax` (on by default) normalizes across
-concepts per pixel. `temperature` divides the scores before softmax.
-
-### Concept Attention Visualizer
-Takes `concept_maps` and an `IMAGE`. Set `concept_name` to a single concept to
-overlay just that map, or leave it empty to tint all concepts.
-
-### Concept Saliency Map
-Takes `concept_maps` and thresholds one concept into a `MASK` plus a colored
-saliency `IMAGE`.
-
-## Usage
-
-1. Load an image, a Krea 2 or Flux.2 (Klein) diffusion model, its text encoder,
-   and its VAE.
-2. Connect them to **Concept Attention** with a prompt and a concept list.
-3. Save the `heatmaps` and/or `overlay` outputs.
-
-See `example_workflow.json` for a Krea 2 graph. To use Flux.2 Klein, switch the
-`UNETLoader` to a Klein model, set the `CLIPLoader` type to `flux2` with
-`qwen_3_4b` (4B) or `qwen_3_8b` (9B), and point `VAELoader` at the Flux.2 VAE.
+= the last 4). `softmax` (on by default) normalizes across concepts per pixel;
+`temperature` divides the scores first.
 
 ## Notes
 
 - The paper's `encode_image` defaults are `noise_timestep=2`, `num_steps=4`.
-- Increase `num_steps`/`noise_timestep` for noisier attribution.
+- Only the positive/cond batch is scored when CFG is active.
+- Raise `temperature` if maps look washed out, lower it if too binary.
 
 ## Based on
 

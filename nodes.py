@@ -1,8 +1,12 @@
 """
 ComfyUI nodes for ConceptAttention.
 
-Give it an image, a Flux.2 (Klein/dev) or Krea 2 model, a VAE, a CLIP, a prompt
-and a list of concepts. It returns a per-concept saliency grid and an overlay.
+Two ways to use it:
+
+  * Concept Attention (encode) - attribute an existing image in one forward pass.
+  * Concept Attention Model (generate) - patch a MODEL, sample normally, then
+    Concept Attention Maps turns the collected attention into heatmaps for the
+    generated image.
 """
 
 import logging
@@ -12,7 +16,13 @@ import torch
 from PIL import Image, ImageDraw
 from matplotlib import colormaps
 
-from .concept_attention import ConceptMaps, compute_concept_attention
+from .concept_attention import (
+    ConceptMaps,
+    build_maps,
+    compute_concept_attention,
+    install,
+    make_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,28 +58,31 @@ def _label(image, text):
     return np.asarray(image)
 
 
-def _tile_heatmaps(maps, concepts):
-    panels = [_label(_colormap(maps[i]), concepts[i]) for i in range(len(concepts))]
-    return np.concatenate(panels, axis=1)
+def _visualize(maps, image, alpha):
+    heatmaps = np.concatenate([_label(_colormap(maps.maps[i]), maps.concepts[i]) for i in range(maps.num_concepts)], axis=1)
 
-
-def _overlay_map(image, heatmap, alpha):
-    colored = colormaps["plasma"](np.asarray(heatmap, dtype=np.float32))[:, :, :3]
-    return np.clip(image * (1.0 - alpha) + colored * alpha, 0.0, 1.0)
-
-
-def _overlay_concepts(image, maps, alpha):
-    overlay = image.copy()
-    colors = colormaps["tab10"](np.linspace(0, 1, max(len(maps), 1)))[:, :3]
-    if len(maps) == 1:
+    base = _to_numpy(image)
+    overlay = base.copy()
+    colors = colormaps["tab10"](np.linspace(0, 1, max(maps.num_concepts, 1)))[:, :3]
+    if maps.num_concepts == 1:
         colors = np.array([[1.0, 0.2, 0.0]])
-    for i in range(len(maps)):
-        m = np.asarray(maps[i], dtype=np.float32)[:, :, None]
+    for i in range(maps.num_concepts):
+        m = maps.maps[i].numpy()[:, :, None]
         overlay = overlay * (1.0 - alpha * m) + colors[i] * (alpha * m)
-    return np.clip(overlay, 0.0, 1.0)
+    return _to_comfy_image(heatmaps), _to_comfy_image(np.clip(overlay, 0.0, 1.0))
+
+
+_COMMON_CONCEPT_WIDGETS = {
+    "layer_start": ("INT", {"default": -1, "min": -1, "max": 200, "step": 1}),
+    "layer_end": ("INT", {"default": -1, "min": -1, "max": 200, "step": 1}),
+    "softmax": ("BOOLEAN", {"default": True}),
+    "temperature": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1000.0, "step": 0.01}),
+}
 
 
 class ConceptAttentionNode:
+    """One-shot concept attention over an existing image."""
+
     CATEGORY = "Concept Attention"
     RETURN_TYPES = ("CONCEPT_MAPS", "IMAGE", "IMAGE")
     RETURN_NAMES = ("concept_maps", "heatmaps", "overlay")
@@ -87,30 +100,76 @@ class ConceptAttentionNode:
                 "concepts": ("STRING", {"multiline": True, "default": "dragon, rock, sky, clouds"}),
                 "noise_timestep": ("INT", {"default": 2, "min": 0, "max": 20, "step": 1}),
                 "num_steps": ("INT", {"default": 4, "min": 1, "max": 50, "step": 1}),
-                "layer_start": ("INT", {"default": -1, "min": -1, "max": 200, "step": 1}),
-                "layer_end": ("INT", {"default": -1, "min": -1, "max": 200, "step": 1}),
-                "softmax": ("BOOLEAN", {"default": True}),
-                "temperature": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1000.0, "step": 0.01}),
                 "alpha": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                **_COMMON_CONCEPT_WIDGETS,
             }
         }
 
     def run(self, model, vae, clip, image, prompt, concepts, noise_timestep, num_steps,
-            layer_start, layer_end, softmax, temperature, alpha, seed):
-        names = _parse_concepts(concepts)
+            alpha, seed, layer_start, layer_end, softmax, temperature):
         maps = compute_concept_attention(
-            model, vae, clip, image, prompt, names,
+            model, vae, clip, image, prompt, _parse_concepts(concepts),
             layer_start=layer_start, layer_end=layer_end, num_steps=num_steps,
             noise_timestep=noise_timestep, seed=seed, softmax=softmax,
             temperature=temperature,
         )
         logger.info("ConceptAttention: %d concepts over %dx%d", maps.num_concepts, maps.width, maps.height)
+        heatmaps, overlay = _visualize(maps, image, alpha)
+        return maps, heatmaps, overlay
 
-        base = _to_numpy(image)
-        heatmaps = _tile_heatmaps(maps.maps.numpy(), maps.concepts)
-        overlay = _overlay_concepts(base, maps.maps.numpy(), alpha)
-        return maps, _to_comfy_image(heatmaps), _to_comfy_image(overlay)
+
+class ConceptAttentionModel:
+    """Patch a MODEL so concept attention is collected during normal sampling."""
+
+    CATEGORY = "Concept Attention"
+    RETURN_TYPES = ("MODEL", "CONCEPT_ATTENTION")
+    RETURN_NAMES = ("model", "concept_state")
+    FUNCTION = "apply"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "concepts": ("STRING", {"multiline": True, "default": "dragon, rock, sky, clouds"}),
+                **_COMMON_CONCEPT_WIDGETS,
+            }
+        }
+
+    def apply(self, model, clip, concepts, layer_start, layer_end, softmax, temperature):
+        state, dit, is_krea2 = make_state(model, clip, _parse_concepts(concepts),
+                                          layer_start, layer_end, softmax, temperature)
+        patcher = model.clone()
+        transformer_options = patcher.model_options.setdefault("transformer_options", {})
+        transformer_options["concept_state"] = state
+        install(state, dit, is_krea2, transformer_options)
+        return patcher, state
+
+
+class ConceptAttentionMaps:
+    """Turn the attention collected during sampling into heatmaps."""
+
+    CATEGORY = "Concept Attention"
+    RETURN_TYPES = ("CONCEPT_MAPS", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("concept_maps", "heatmaps", "overlay")
+    FUNCTION = "run"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "concept_state": ("CONCEPT_ATTENTION",),
+                "image": ("IMAGE",),
+                "alpha": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+            }
+        }
+
+    def run(self, concept_state, image, alpha):
+        maps = build_maps(concept_state, image)
+        heatmaps, overlay = _visualize(maps, image, alpha)
+        return maps, heatmaps, overlay
 
 
 class ConceptAttentionVisualizerNode:
@@ -134,9 +193,12 @@ class ConceptAttentionVisualizerNode:
         base = _to_numpy(image)
         name = concept_name.strip()
         if name and name in concept_maps.concepts:
-            overlay = _overlay_map(base, concept_maps.maps[concept_maps.concepts.index(name)].numpy(), alpha)
+            index = concept_maps.concepts.index(name)
+            colored = colormaps["plasma"](concept_maps.maps[index].numpy())[:, :, :3]
+            overlay = np.clip(base * (1.0 - alpha) + colored * alpha, 0.0, 1.0)
         else:
-            overlay = _overlay_concepts(base, concept_maps.maps.numpy(), alpha)
+            _, overlay = _visualize(concept_maps, image, alpha)
+            return (overlay,)
         return (_to_comfy_image(overlay),)
 
 
@@ -170,12 +232,16 @@ class ConceptSaliencyMapNode:
 
 NODE_CLASS_MAPPINGS = {
     "ConceptAttentionNode": ConceptAttentionNode,
+    "ConceptAttentionModel": ConceptAttentionModel,
+    "ConceptAttentionMaps": ConceptAttentionMaps,
     "ConceptAttentionVisualizerNode": ConceptAttentionVisualizerNode,
     "ConceptSaliencyMapNode": ConceptSaliencyMapNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ConceptAttentionNode": "Concept Attention",
+    "ConceptAttentionNode": "Concept Attention (encode image)",
+    "ConceptAttentionModel": "Concept Attention Model (generate)",
+    "ConceptAttentionMaps": "Concept Attention Maps",
     "ConceptAttentionVisualizerNode": "Concept Attention Visualizer",
     "ConceptSaliencyMapNode": "Concept Saliency Map",
 }
