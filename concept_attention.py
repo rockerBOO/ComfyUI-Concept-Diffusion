@@ -24,7 +24,11 @@ Supported backbones:
   * Krea 2                 -> comfy.ldm.krea2.model.SingleStreamDiT
 """
 
-from dataclasses import dataclass, field
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -36,47 +40,51 @@ from comfy.ldm.flux.math import attention as flux_attention
 from comfy.ldm.flux.math import apply_rope
 from comfy.ldm.modules.attention import optimized_attention_masked
 
+if TYPE_CHECKING:
+    from comfy.model_patcher import ModelPatcher
+    from comfy.sd import CLIP, VAE
+
 
 @dataclass
 class ConceptMaps:
     """Concept saliency maps, normalized to [0, 1] at image resolution."""
-    concepts: list = field(default_factory=list)
-    maps: torch.Tensor = None          # (C, H, W) float32 cpu
-    height: int = 0
-    width: int = 0
+    concepts: list[str]
+    maps: torch.Tensor                 # (C, H, W) float32 cpu
+    height: int
+    width: int
 
     @property
-    def num_concepts(self):
+    def num_concepts(self) -> int:
         return len(self.concepts)
 
 
 class ConceptAttentionState:
     """Shared, mutable accumulator for a single concept attention run."""
 
-    def __init__(self, concepts, concept_ctx):
+    def __init__(self, concepts: list[str], concept_ctx: torch.Tensor) -> None:
         self.concepts = concepts
         self.concept_ctx = concept_ctx
 
-        self.dit = None
-        self.grid = None
-        self.residual = None
-        self.concept_pe = None
-        self.tvec = None
-        self.call_concept = {}
-        self.layer_scores = {}
-        self.layer_count = {}
+        self.dit: Any = None
+        self.grid: tuple[int, int] | None = None
+        self.residual: torch.Tensor | None = None
+        self.concept_pe: torch.Tensor | None = None
+        self.tvec: torch.Tensor | None = None
+        self.call_concept: dict[int, torch.Tensor] = {}
+        self.layer_scores: dict[int, torch.Tensor] = {}
+        self.layer_count: dict[int, int] = {}
 
     @property
-    def num_concepts(self):
+    def num_concepts(self) -> int:
         return len(self.concepts)
 
     @property
-    def layers(self):
+    def layers(self) -> list[int]:
         return sorted(self.layer_scores)
 
     # -- per-forward setup -------------------------------------------------
 
-    def begin_call(self, dit, x, timesteps, is_krea2):
+    def begin_call(self, dit: Any, x: torch.Tensor, timesteps: torch.Tensor, is_krea2: bool) -> None:
         self.dit = dit
         self.grid = _grid_shape(dit, x)
         self.residual = self._initial_residual(dit, x, is_krea2)
@@ -87,11 +95,11 @@ class ConceptAttentionState:
             t = dit.tmlp(timestep_embedding(timesteps, dit.tdim).unsqueeze(1).to(x.dtype))
             self.tvec = dit.tproj(t)
 
-    def end_call(self):
+    def end_call(self) -> None:
         self.tvec = None
         self.call_concept = {}
 
-    def _initial_residual(self, dit, x, is_krea2):
+    def _initial_residual(self, dit: Any, x: torch.Tensor, is_krea2: bool) -> torch.Tensor:
         ctx = comfy.model_management.cast_to_device(self.concept_ctx, x.device, x.dtype)
         if is_krea2:
             packed = ctx.reshape(1, self.num_concepts, dit.txtlayers, dit.txtdim)
@@ -100,7 +108,7 @@ class ConceptAttentionState:
             residual = dit.txt_in(ctx)
         return residual.expand(x.shape[0], -1, -1)
 
-    def add_scores(self, dot, layer_index):
+    def add_scores(self, dot: torch.Tensor, layer_index: int) -> None:
         dot = dot.detach().float().cpu()
         if layer_index in self.layer_scores:
             self.layer_scores[layer_index] = self.layer_scores[layer_index] + dot
@@ -114,13 +122,13 @@ class ConceptAttentionState:
 # Text encoding
 # ---------------------------------------------------------------------------
 
-def _raw_token_ids(clip, text):
+def _raw_token_ids(clip: Any, text: str) -> tuple[list[int], Any]:
     tokens = clip.tokenize(text)
     key = next(iter(tokens))
     return [t[0] for t in tokens[key][0]], tokens
 
 
-def _concept_span(token_ids):
+def _concept_span(token_ids: list[int]) -> tuple[int, int]:
     """Return the [start, end) span of the concept text inside the chat template."""
     user_turns = [i for i in range(len(token_ids) - 1) if token_ids[i] == 151644 and token_ids[i + 1] == 872]
     if not user_turns:
@@ -130,13 +138,13 @@ def _concept_span(token_ids):
     return start, end
 
 
-def _encode_context(clip, text):
+def _encode_context(clip: Any, text: str) -> tuple[torch.Tensor, list[int]]:
     token_ids, tokens = _raw_token_ids(clip, text)
     cond = clip.encode_from_tokens_scheduled(tokens)
     return cond[0][0], token_ids
 
 
-def encode_concept_context(clip, concepts, strip_prefix):
+def encode_concept_context(clip: Any, concepts: list[str], strip_prefix: bool) -> torch.Tensor:
     """Encode each concept and average its token span into a single embedding row."""
     vectors = []
     for concept in concepts:
@@ -153,11 +161,11 @@ def encode_concept_context(clip, concepts, strip_prefix):
 # Architecture helpers
 # ---------------------------------------------------------------------------
 
-def depth_of(dit):
+def depth_of(dit: Any) -> int:
     return len(dit.double_blocks) if hasattr(dit, "double_blocks") else len(dit.blocks)
 
 
-def _layer_indices_for(dit, layer_start, layer_end):
+def _layer_indices_for(dit: Any, layer_start: int | None, layer_end: int | None) -> list[int]:
     depth = depth_of(dit)
     if layer_start is None or layer_start < 0:
         layer_start = max(0, depth - 4)
@@ -168,14 +176,14 @@ def _layer_indices_for(dit, layer_start, layer_end):
     return list(range(layer_start, layer_end))
 
 
-def _grid_shape(dit, latent):
+def _grid_shape(dit: Any, latent: torch.Tensor) -> tuple[int, int]:
     patch = getattr(dit, "patch", None) or getattr(dit, "patch_size", 1)
     steps_h = (latent.shape[-2] + (patch // 2)) // patch
     steps_w = (latent.shape[-1] + (patch // 2)) // patch
     return steps_h, steps_w
 
 
-def _cond_index(transformer_options):
+def _cond_index(transformer_options: dict[str, Any]) -> int | None:
     cond_or_uncond = transformer_options.get("cond_or_uncond")
     if not cond_or_uncond:
         return 0
@@ -185,13 +193,13 @@ def _cond_index(transformer_options):
         return None
 
 
-def _repeat_kv(t, heads):
+def _repeat_kv(t: torch.Tensor, heads: int) -> torch.Tensor:
     if t.shape[1] == heads:
         return t
     return t.repeat_interleave(heads // t.shape[1], dim=1)
 
 
-def _is_supported(base):
+def _is_supported(base: Any) -> tuple[Any, bool]:
     dit = base.diffusion_model
     if isinstance(base, comfy.model_base.Krea2):
         return dit, True
@@ -204,7 +212,7 @@ def _is_supported(base):
 # Hook installation
 # ---------------------------------------------------------------------------
 
-def install(state, dit, is_krea2, transformer_options):
+def install(state: ConceptAttentionState, dit: Any, is_krea2: bool, transformer_options: dict[str, Any]) -> None:
     """Register the observational capture hooks on a transformer_options dict."""
     if is_krea2:
         patches = transformer_options.setdefault("patches", {})
@@ -222,8 +230,8 @@ def install(state, dit, is_krea2, transformer_options):
 # Flux.2 / Flux.2 Klein
 # ---------------------------------------------------------------------------
 
-def _flux2_wrapper(executor, x, timestep, context, y=None, guidance=None, ref_latents=None, control=None, transformer_options={}, **kwargs):
-    state = transformer_options.get("concept_state")
+def _flux2_wrapper(executor: Any, x: torch.Tensor, timestep: torch.Tensor, context: torch.Tensor, y: torch.Tensor | None = None, guidance: torch.Tensor | None = None, ref_latents: Any = None, control: Any = None, transformer_options: dict[str, Any] = {}, **kwargs: Any) -> Any:
+    state: ConceptAttentionState | None = transformer_options.get("concept_state")
     if state is not None:
         state.begin_call(executor.class_obj, x, timestep, is_krea2=False)
     try:
@@ -233,18 +241,18 @@ def _flux2_wrapper(executor, x, timestep, context, y=None, guidance=None, ref_la
             state.end_call()
 
 
-def _mod_pair(vec, block):
+def _mod_pair(vec: Any, block: Any) -> tuple[Any, Any]:
     if isinstance(vec, tuple):
         return vec[0], vec[1]
     return block.img_mod(vec), block.txt_mod(vec)
 
 
-def _flux2_block_replacement(layer_index):
+def _flux2_block_replacement(layer_index: int) -> Callable[[dict[str, Any], dict[str, Any]], Any]:
     """Double-block wrapper that also advances and scores the concept stream."""
-    def replacement(args, extra):
-        transformer_options = args.get("transformer_options", {})
-        state = transformer_options.get("concept_state")
-        if state is None or state.residual is None:
+    def replacement(args: dict[str, Any], extra: dict[str, Any]) -> Any:
+        transformer_options: dict[str, Any] = args.get("transformer_options", {})
+        state: ConceptAttentionState | None = transformer_options.get("concept_state")
+        if state is None or state.residual is None or state.concept_pe is None:
             return extra["original_block"](args)
 
         block = state.dit.double_blocks[layer_index]
@@ -303,8 +311,8 @@ def _flux2_block_replacement(layer_index):
 # Krea 2
 # ---------------------------------------------------------------------------
 
-def _krea2_wrapper(executor, x, timesteps, context, attention_mask=None, ref_latents=None, transformer_options={}, **kwargs):
-    state = transformer_options.get("concept_state")
+def _krea2_wrapper(executor: Any, x: torch.Tensor, timesteps: torch.Tensor, context: torch.Tensor, attention_mask: torch.Tensor | None = None, ref_latents: Any = None, transformer_options: dict[str, Any] = {}, **kwargs: Any) -> Any:
+    state: ConceptAttentionState | None = transformer_options.get("concept_state")
     if state is not None:
         state.begin_call(executor.class_obj, x, timesteps, is_krea2=True)
     try:
@@ -314,9 +322,9 @@ def _krea2_wrapper(executor, x, timesteps, context, attention_mask=None, ref_lat
             state.end_call()
 
 
-def _krea2_attn_patch(q, k, v, pe=None, attn_mask=None, extra_options=None):
+def _krea2_attn_patch(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pe: torch.Tensor | None = None, attn_mask: torch.Tensor | None = None, extra_options: dict[str, Any] | None = None) -> dict[str, Any]:
     extra_options = extra_options or {}
-    state = extra_options.get("concept_state")
+    state: ConceptAttentionState | None = extra_options.get("concept_state")
     if state is None or extra_options.get("block_type") != "single" or "img_slice" not in extra_options:
         return {}
     if state.residual is None or state.tvec is None:
@@ -348,8 +356,8 @@ def _krea2_attn_patch(q, k, v, pe=None, attn_mask=None, extra_options=None):
     return {}
 
 
-def _krea2_output_patch(out, extra_options):
-    state = extra_options.get("concept_state")
+def _krea2_output_patch(out: torch.Tensor, extra_options: dict[str, Any]) -> torch.Tensor:
+    state: ConceptAttentionState | None = extra_options.get("concept_state")
     if state is None or extra_options.get("block_type") != "single" or "img_slice" not in extra_options:
         return out
     layer_index = extra_options["block_index"]
@@ -368,7 +376,7 @@ def _krea2_output_patch(out, extra_options):
 # Encode entry point
 # ---------------------------------------------------------------------------
 
-def make_state(model, clip, concepts):
+def make_state(model: ModelPatcher, clip: CLIP, concepts: list[str]) -> tuple[ConceptAttentionState, Any, bool]:
     """Build a ConceptAttentionState plus the resolved backbone for the nodes."""
     base = model.model
     dit, is_krea2 = _is_supported(base)
@@ -379,10 +387,10 @@ def make_state(model, clip, concepts):
     return ConceptAttentionState(concepts, concept_ctx), dit, is_krea2
 
 
-def compute_concept_attention(model, vae, clip, image, prompt, concepts,
-                              layer_start=None, layer_end=None, num_steps=4,
-                              noise_timestep=2, seed=0, softmax=True,
-                              temperature=1000.0):
+def compute_concept_attention(model: ModelPatcher, vae: VAE, clip: CLIP, image: torch.Tensor, prompt: str, concepts: list[str],
+                              layer_start: int | None = None, layer_end: int | None = None, num_steps: int = 4,
+                              noise_timestep: int = 2, seed: int = 0, softmax: bool = True,
+                              temperature: float = 1000.0) -> ConceptMaps:
     base = model.model
     state, dit, is_krea2 = make_state(model, clip, concepts)
     layer_indices = _layer_indices_for(dit, layer_start, layer_end)
@@ -402,7 +410,7 @@ def compute_concept_attention(model, vae, clip, image, prompt, concepts,
     device = getattr(model, "load_device", None) or comfy.model_management.get_torch_device()
     noisy = noisy.to(device)
 
-    transformer_options = {}
+    transformer_options: dict[str, Any] = {}
     if "transformer_options" in model.model_options:
         transformer_options = pe.merge_nested_dicts(transformer_options, model.model_options["transformer_options"], copy_dict1=False)
     transformer_options["concept_state"] = state
@@ -416,7 +424,7 @@ def compute_concept_attention(model, vae, clip, image, prompt, concepts,
 # Heatmaps
 # ---------------------------------------------------------------------------
 
-def resolve_layers(state, layer_start=None, layer_end=None):
+def resolve_layers(state: ConceptAttentionState, layer_start: int | None = None, layer_end: int | None = None) -> list[int]:
     if layer_start is not None and layer_start >= 0:
         depth = depth_of(state.dit)
         layer_start = max(0, min(layer_start, depth - 1))
@@ -428,7 +436,7 @@ def resolve_layers(state, layer_start=None, layer_end=None):
     return [i for i in range(max(0, depth - 4), depth) if i in state.layer_scores]
 
 
-def build_maps(state, image, layer_indices=None, softmax=True, temperature=1000.0):
+def build_maps(state: ConceptAttentionState, image: torch.Tensor, layer_indices: list[int] | None = None, softmax: bool = True, temperature: float = 1000.0) -> ConceptMaps:
     if not state.layer_scores:
         raise RuntimeError("ConceptAttention did not collect any attention; was the patched model used?")
 
@@ -437,10 +445,11 @@ def build_maps(state, image, layer_indices=None, softmax=True, temperature=1000.
     if not layers:
         raise RuntimeError("ConceptAttention collected no attention for the requested layers")
 
-    scores = sum(state.layer_scores[i] / state.layer_count[i] for i in layers) / len(layers)
+    scores = torch.stack([state.layer_scores[i] / state.layer_count[i] for i in layers]).mean(dim=0)
     if softmax:
         scores = torch.softmax(scores / max(float(temperature), 1e-6), dim=0)
 
+    assert state.grid is not None
     grid_h, grid_w = state.grid
     if grid_h * grid_w != scores.shape[1]:
         raise RuntimeError(f"ConceptAttention image tokens ({scores.shape[1]}) do not match latent grid {grid_h}x{grid_w}")

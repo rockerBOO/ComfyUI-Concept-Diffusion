@@ -13,3 +13,10 @@ PublisherId = "concept-diffusion"
 DisplayName = "ComfyUI-Concept-Diffusion"
 Icon = ""
 
+[tool.pyright]
+include = ["."]
+exclude = ["__pycache__", ".git"]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+extraPaths = ["../.."]
+
